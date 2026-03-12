@@ -1,0 +1,645 @@
+---
+title: "Gwas"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Load in the GWASpoly library
+
+```{r}
+library(GWASpoly)
+```
+
+
+### Load PCA and DAPC structure matrices
+
+```{r}
+dir.create("GWAS", showWarnings = FALSE)
+dir.create("GWAS/Yield", showWarnings = FALSE, recursive = TRUE)
+pca <- read.csv("DAPC_PIC_output/PCA_principal_components.csv", header=TRUE)
+dapc <- read.csv("DAPC_PIC_output/DAPC_membership_probabilities.csv", header=TRUE)
+```
+
+
+### Yield with PCA
+First, the phenotype data needs to be matched to the PCA data.
+
+```{r}
+geno <- read.csv("sharma_genotype_GWAS_poly.csv", header=TRUE)
+pheno <- read.csv("BLUEs_PIC_output/BLUES.csv", header=TRUE)
+pheno_yield <- pheno[, c("ID", "yield_kg")]
+colnames(pheno_yield) <- c("Sample", "Yield")
+write.csv(pheno_yield, "GWAS/Yield/pheno_yield.csv", row.names=FALSE)
+```
+```{r}
+colnames(pca)[1] <- "Sample"
+```
+
+```{r}
+
+merged_yield <- merge(pca, pheno_yield, by = "Sample")
+merged_yield <- merged_yield[, c("Sample", "Yield", setdiff(names(merged_yield), c("Sample", "Yield")))]
+write.csv(merged_yield, file = "GWAS/Yield/merged_yield.csv", row.names = FALSE)
+
+#Check merged_yield file matches the phenotype and PCA data to the correct sample IDs
+
+
+```
+
+Then, GWASpoly for Yield with PCA data can be performed.
+
+```{r}
+#Load data into GWASpoly
+data_yield_PCA <- read.GWASpoly(
+  ploidy = 4,
+  pheno.file = "GWAS/Yield/merged_yield.csv",
+  geno.file = "sharma_genotype_GWAS_poly.csv",
+  format = "numeric",  
+  n.traits=1,
+  delim = ","
+)
+
+
+#Set population covariates for PCA
+params_yield_PCA <- set.params(
+  fixed = c("PC1", "PC2", "PC3", "PC4", "PC5"),
+  fixed.type = rep("numeric", 5),
+  n.PC = 5,
+  MAF = NULL,
+  geno.freq = NULL,
+  P3D = TRUE
+)
+
+
+#Set K matrix
+data_yield_PCA <- set.K(data_yield_PCA, K = NULL, n.core = 1, LOCO = FALSE)
+
+
+#Run GWASpoly for yield PCA
+gwas_yield_pca <- GWASpoly(
+  data = data_yield_PCA,
+  models = c("additive", "general", "1-dom", "2-dom"),
+  traits = "Yield",
+  params = params_yield_PCA,
+  n.core = 4  
+)
+
+
+#Set significant threshold
+gwas_yield_pca <- set.threshold(
+  data = gwas_yield_pca,
+  method = "Bonferroni",
+  level = 0.05,
+  n.core = 4
+)
+
+```
+
+Once GWASpoly has been completed, Manhattan plots and QQ plots can be made. 
+
+```{r}
+#Manhattan plots
+pdf("GWAS/Yield/manhattan_yield_PCA_additive.pdf", width = 8, height = 6)
+manhattan.plot(gwas_yield_pca, traits="Yield", models="additive")
+dev.off()
+
+pdf("GWAS/Yield/manhattan_yield_PCA_general.pdf", width = 8, height = 6)
+manhattan.plot(gwas_yield_pca, traits="Yield", models="general")
+dev.off()
+
+pdf("GWAS/Yield/manhattan_yield_PCA_1domalt.pdf", width = 8, height = 6)
+manhattan.plot(gwas_yield_pca, traits="Yield", models="1-dom-alt")
+dev.off()
+
+pdf("GWAS/Yield/manhattan_yield_PCA_1domref.pdf", width = 8, height = 6)
+manhattan.plot(gwas_yield_pca, traits="Yield", models="1-dom-ref")
+dev.off()
+
+pdf("GWAS/Yield/manhattan_yield_PCA_2domalt.pdf", width = 8, height = 6)
+manhattan.plot(gwas_yield_pca, traits="Yield", models="2-dom-alt")
+dev.off()
+
+pdf("GWAS/Yield/manhattan_yield_PCA_2domref.pdf", width = 8, height = 6)
+manhattan.plot(gwas_yield_pca, traits="Yield", models="2-dom-ref")
+dev.off()
+
+
+#QQ plot
+pdf("GWAS/Yield/QQ_yield_PCA.pdf", width = 8, height = 6)
+qq.plot(gwas_yield_pca, trait = "Yield")
+dev.off()
+```
+
+The next step is to create an SNP size effect table using the GWASpoly results.
+
+```{r}
+models <- c("additive", "general", "1-dom-alt", "1-dom-ref", "2-dom-alt", "2-dom-ref")
+
+gwas_yield_PCA_results <- data.frame()
+
+#Loop over models
+for (model in models) {
+  #Get the threshold for the current model
+  threshold <- gwas_yield_pca@threshold["Yield", model]
+  
+  #Create a temporary results table for the current model
+  temp_results <- data.frame(
+    SNP = gwas_yield_pca@map$Marker,
+    Chromosome = gwas_yield_pca@map$Chrom,
+    Position = gwas_yield_pca@map$Position,
+    Model = model,
+    Effect = gwas_yield_pca@effects$Yield[[model]],
+    Pvalue = gwas_yield_pca@scores$Yield[[model]],
+    Significant = gwas_yield_pca@scores$Yield[[model]] >= threshold
+  )
+  
+  #Add to final results
+  gwas_yield_PCA_results <- rbind(gwas_yield_PCA_results, temp_results)
+}
+
+# Save as CSV
+write.csv(
+  gwas_yield_PCA_results,
+  "GWAS/Yield/yield_PCA_snp_effect_table.csv",
+  row.names = FALSE
+)
+```
+
+Using this file, filter the Significant column for 'TRUE' values only, and use these for compiling a table for the significant SNPs for Yield. GWASpoly for Yield using PCA found 6 significant SNPs across chromosomes 6 and 7.
+
+
+
+### Yield with DAPC
+The phenotype data for Yield needs to be matched to the DAPC data. The initial pheno_yield.csv file has already been created in ### Yield with PCA.
+
+```{r}
+# Rename the first column of the DAPC data frame to 'Sample'
+colnames(dapc)[1] <- "Sample"
+
+merged_yield_DAPC <- merge(dapc, pheno_yield, by = "Sample")
+merged_yield_DAPC <- merged_yield_DAPC[, c("Sample", "Yield", setdiff(names(merged_yield_DAPC), c("Sample", "Yield")))]
+write.csv(merged_yield_DAPC, file = "GWAS/Yield/merged_yield_DAPC.csv", row.names = FALSE)
+
+#Check merged_yield_DAPC file matches the phenotype and DAPC data to the correct sample IDs
+
+```
+
+Then, GWASpoly for Yield with DAPC data can be performed.
+
+```{r}
+#Load data into GWASpoly
+data_yield_DAPC <- read.GWASpoly(
+  ploidy = 4,
+  pheno.file = "GWAS/Yield/merged_yield_DAPC.csv",
+  geno.file = "sharma_genotype_GWAS_poly.csv", # The corrected path
+  format = "numeric",  
+  n.traits=1,
+  delim = ","
+)
+
+
+#Set population covariates for DAPC
+params_yield_DAPC <- set.params(
+  fixed = c("X1", "X2", "X3", "X4"),
+  fixed.type = rep("numeric", 4),
+  n.PC = 4,
+  MAF = NULL,
+  geno.freq = NULL,
+  P3D = TRUE
+)
+
+
+#Set K matrix
+data_yield_DAPC <- set.K(data_yield_DAPC, K = NULL, n.core = 1, LOCO = FALSE)
+
+
+#Run GWAS for yield DAPC
+gwas_yield_DAPC <- GWASpoly(
+  data = data_yield_DAPC,
+  models = c("additive", "general", "1-dom", "2-dom"),
+  traits = "Yield",
+  params = params_yield_DAPC,
+  n.core = 4 
+)
+
+
+#Set significant threshold
+gwas_yield_DAPC <- set.threshold(
+  data = gwas_yield_DAPC,
+  method = "Bonferroni",
+  level = 0.05,
+  n.core = 4
+)
+```
+
+Once GWASpoly has been completed, Manhattan plots and QQ plots can be made. 
+
+```{r}
+#Manhattan plots
+pdf("GWAS/Yield/manhattan_yield_DAPC_additive.pdf", width = 8, height = 6)
+manhattan.plot(gwas_yield_DAPC, traits="Yield", models="additive")
+dev.off()
+
+pdf("GWAS/Yield/manhattan_yield_DAPC_general.pdf", width = 8, height = 6)
+manhattan.plot(gwas_yield_DAPC, traits="Yield", models="general")
+dev.off()
+
+pdf("GWAS/Yield/manhattan_yield_DAPC_1domalt.pdf", width = 8, height = 6)
+manhattan.plot(gwas_yield_DAPC, traits="Yield", models="1-dom-alt")
+dev.off()
+
+pdf("GWAS/Yield/manhattan_yield_DAPC_1domref.pdf", width = 8, height = 6)
+manhattan.plot(gwas_yield_DAPC, traits="Yield", models="1-dom-ref")
+dev.off()
+
+pdf("GWAS/Yield/manhattan_yield_DAPC_2domalt.pdf", width = 8, height = 6)
+manhattan.plot(gwas_yield_DAPC, traits="Yield", models="2-dom-alt")
+dev.off()
+
+pdf("GWAS/Yield/manhattan_yield_DAPC_2domref.pdf", width = 8, height = 6)
+manhattan.plot(gwas_yield_DAPC, traits="Yield", models="2-dom-ref")
+dev.off()
+
+
+#QQ plot
+pdf("GWAS/Yield/QQ_yield_DAPC.pdf", width = 8, height = 6)
+qq.plot(gwas_yield_DAPC, trait = "Yield")
+dev.off()
+```
+
+Then, create an SNP size effect table using the GWASpoly results.
+
+```{r}
+models <- c("additive", "general", "1-dom-alt", "1-dom-ref", "2-dom-alt", "2-dom-ref")
+
+gwas_yield_DAPC_results <- data.frame()
+
+#Loop over models
+for (model in models) {
+  #Get the threshold for the current model
+  threshold <- gwas_yield_DAPC@threshold["Yield", model]
+  
+  #Create a temporary results table for the current model
+  temp_results <- data.frame(
+    SNP = gwas_yield_DAPC@map$Marker,
+    Chromosome = gwas_yield_DAPC@map$Chrom,
+    Position = gwas_yield_DAPC@map$Position,
+    Model = model,
+    Effect = gwas_yield_DAPC@effects$Yield[[model]],
+    Pvalue = gwas_yield_DAPC@scores$Yield[[model]],
+    Significant = gwas_yield_DAPC@scores$Yield[[model]] >= threshold
+  )
+  
+  #Add to final results
+  gwas_yield_DAPC_results <- rbind(gwas_yield_DAPC_results, temp_results)
+}
+
+# Save as CSV
+write.csv(
+  gwas_yield_DAPC_results,
+  "GWAS/Yield/yield_DAPC_snp_effect_table.csv",
+  row.names = FALSE
+)
+```
+
+Using this file, filter the Significant column for 'TRUE' values only, and use these for compiling a table for the significant SNPs for Yield. GWASpoly for Yield using DAPC also found 6 significant SNPs across chromosomes 6 and 7.
+
+As the Manhattan plot for the General DAPC model shows the most SNPs above the threshold value, this model was chosen for creating boxplots for the significant SNPs in Yield.
+
+To create these boxplots, ggplot2 is used. 
+
+To extract the -log10 values, the genotype data first needs to be transposed so that rows show the samples and columns show the SNPs.
+
+```{r}
+#Transpose genotype data
+geno_raw <- read.csv("sharma_genotype_GWAS_poly.csv", row.names = 1, check.names = FALSE)
+geno_t <- t(geno_raw)  # transpose: now rows=samples, columns=SNPs
+geno_t <- as.data.frame(geno_t)
+
+
+#Call DAPC data for the phenotype
+pheno <- read.csv("GWAS/Yield/merged_yield_DAPC.csv", stringsAsFactors = FALSE)
+
+
+#Match samples present in both genotype and phenotype
+common_samples <- intersect(rownames(geno_t), pheno$Sample)
+geno_t <- geno_t[common_samples, , drop = FALSE]
+pheno <- pheno[pheno$Sample %in% common_samples, ]
+pheno <- pheno[match(common_samples, pheno$Sample), ]
+
+
+#Specify trait and model
+trait <- "Yield"
+model <- "general"
+
+
+#Get Bonferroni threshold for the specified trait and model
+bonf_threshold <- gwas_yield_DAPC@threshold[trait, model]
+
+
+#Extract -log10(p-values) for the trait/model
+logpvals <- gwas_yield_DAPC@scores[[trait]][[model]]
+
+
+#Significant SNPs are those with -log10(pval) > threshold
+sig_indices <- which(logpvals > bonf_threshold)
+
+
+#Extract significant SNPs
+y_sig_qtls <- data.frame(
+  Marker = gwas_yield_DAPC@map$Marker[sig_indices],
+  Chrom = gwas_yield_DAPC@map$Chrom[sig_indices],
+  Position = gwas_yield_DAPC@map$Position[sig_indices],
+  log10_P = logpvals[sig_indices]
+)
+
+
+#Get SNP names (Markers)
+y_sig_snps <- trimws(y_sig_qtls$Marker)
+
+
+#Check which significant SNPs are in the genotype data
+sig_snps_present <- y_sig_snps[y_sig_snps %in% colnames(geno_t)]
+
+
+if (length(sig_snps_present) == 0) {
+  stop("No significant SNPs found in genotype data columns.")
+} else {
+  message(length(sig_snps_present), " significant SNP(s) found in genotype data.")
+}
+
+
+#Load ggplot2 library
+library(ggplot2)
+
+
+#Create boxplot
+plot_qtl_boxplot <- function(snp_id, geno_mat, pheno_df, trait) {
+  geno_vec <- geno_mat[[snp_id]]
+  pheno_vec <- pheno_df[[trait]]
+  
+  df <- data.frame(Genotype = as.factor(geno_vec), Phenotype = pheno_vec)
+  
+   genotype_labels <- c("0" = "AAAA", "1" = "AAAB", "2" = "AABB", "3" = "ABBB", "4" = "BBBB")
+  
+  ggplot(df, aes(x = Genotype, y = Phenotype)) +
+    geom_boxplot() +
+    labs(title = paste("QTL boxplot for Yield"),
+         x = paste( "Genotype for", snp_id), 
+         y = trait) +
+    scale_x_discrete(labels = genotype_labels) +
+    theme_minimal()
+}
+
+#Save boxplot as PDF
+pdf("GWAS/Yield/QTL_boxplot_yield.pdf", width = 7, height = 5)
+for (snp in sig_snps_present) {
+  print(plot_qtl_boxplot(snp, geno_t, pheno, "Yield"))
+}
+dev.off()
+```
+
+Using the DAPC general model again, an improved QQ plot showing the significant SNPs only can be created. Significant SNPs were found on chromosomes 6 and 7, so two QQ plots are needed - one for each chromosome.
+
+```{r}
+# Extract scores for general model and map info, combine with SNP info
+y_general_scores <- gwas_yield_DAPC@scores[["Yield"]][["general"]]
+y_map_info <- as.data.frame(gwas_yield_DAPC@map)
+y_results_df <- cbind(y_map_info, Score = y_general_scores)
+
+# Ensure Chrom is character and clean common prefixes
+y_results_df$Chrom <- as.character(y_results_df$Chrom)
+y_results_df$Chrom <- gsub("^chr", "", y_results_df$Chrom, ignore.case = TRUE)
+y_results_df$Chrom <- gsub("^Chr", "", y_results_df$Chrom, ignore.case = TRUE)
+y_results_df$Chrom <- gsub("^0+", "", y_results_df$Chrom)  # remove leading zeros
+
+# Function to make QQ plot for a chromosome
+plot_chr_qq <- function(df, chr_num, out_file) {
+  chr_df <- subset(df, Chrom == as.character(chr_num))
+  
+  if (nrow(chr_df) == 0) {
+    warning(paste("No markers found for chromosome", chr_num))
+    return(NULL)
+  }
+  
+  # Convert -log10(p) scores back to p-values
+  pvals <- 10^(-chr_df$Score)
+  
+  # Expected vs observed
+  expected <- -log10(ppoints(length(pvals)))
+  observed <- -log10(sort(pvals))
+  
+  # Save plot
+  pdf(out_file, width = 7, height = 7)
+  plot(expected, observed,
+       main = paste("QQ Plot: Yield General Model - Chromosome", chr_num),
+       xlab = "Expected -log10(p)",
+       ylab = "Observed -log10(p)",
+       pch = 20, col = "red")
+  abline(0, 1, col = "black")
+  dev.off()
+}
+
+# Run for chromosomes 6 and 7
+plot_chr_qq(y_results_df, 6, "GWAS/Yield/QQplot_Yield_general_chr6.pdf")
+plot_chr_qq(y_results_df, 7, "GWAS/Yield/QQplot_Yield_general_chr7.pdf")
+
+```
+
+These QQ plots will be used in the Results figures. 
+
+
+
+### Yield with STRUCTURE
+The phenotype data for Yield needs to be matched to the STRUCTURE data. The initial pheno_yield.csv file has already been created in ### Yield with PCA.
+
+First, the k3 outfile needs to be converted into a csv file.
+
+```{r}
+lines <- readLines("K3.outfile")
+lines <- lines[lines != ""]
+
+#Process each line and convert to a dataframe
+structure_data_list <- lapply(lines, function(line) {
+    parts <- strsplit(line, ":")[[1]]
+  left_fields <- strsplit(trimws(parts[1]), "\\s+")[[1]]
+    right_fields <- strsplit(trimws(parts[2]), "\\s+")[[1]]
+
+  data.frame(
+    SampleID = left_fields[2],  # Sample ID
+    Q1 = as.numeric(right_fields[1]),
+    Q2 = as.numeric(right_fields[2]),
+    Q3 = as.numeric(right_fields[3])
+  )
+})
+
+#Combine all rows
+structure_df <- do.call(rbind, structure_data_list)
+
+#Save as csv
+write.csv(structure_df, "GWAS/structure.csv", row.names = FALSE)
+
+#Check structure.csv file matches the data in the k3 outfile
+
+```
+
+Next, the STRUCTURE data can be merged with the phenotype data.
+
+```{r}
+pheno_yield <- read.csv("GWAS/Yield/pheno_yield.csv")
+structure <- read.csv("GWAS/structure.csv")
+
+#Add number ID to phenotype
+pheno_yield$STRUCTURE_ID <- 1:nrow(pheno_yield)
+
+#Merge on ID
+merged <- merge(pheno_yield, structure, by.x = "STRUCTURE_ID", by.y = "SampleID")
+merged$STRUCTURE_ID <- NULL
+
+#Save merged file
+write.csv(merged, "GWAS/Yield/merged_yield_STRUCTURE.csv", row.names = FALSE)
+
+#Check merged_yield_STRUCTURE file matches the phenotype and STRUCTURE data to the correct sample IDs
+```
+
+Then, GWASpoly for Yield with STRUCTURE data can be performed.
+
+```{r}
+#Load data into GWASpoly
+data_yield_STRUCTURE <- read.GWASpoly(
+  ploidy = 4,
+  pheno.file = "GWAS/Yield/merged_yield_STRUCTURE.csv",
+  geno.file = "sharma_genotype_GWAS_poly.csv",
+  format = "numeric",  
+  n.traits=1,
+  delim = ","
+)
+
+
+#Set population covariates for STRUCTURE
+params_yield_STRUCTURE <- set.params(
+  fixed = c("Q1", "Q2", "Q3"),
+  fixed.type = rep("numeric", 3),
+  n.PC = 3,
+  MAF = NULL,
+  geno.freq = NULL,
+  P3D = TRUE
+)
+
+
+#Set K matrix
+data_yield_STRUCTURE <- set.K(data_yield_STRUCTURE, K = NULL, n.core = 1, LOCO = FALSE)
+
+
+#Run GWAS for yield STRUCTURE
+gwas_yield_STRUCTURE <- GWASpoly(
+  data = data_yield_STRUCTURE,
+  models = c("additive", "general", "1-dom", "2-dom"),
+  traits = "Yield",
+  params = params_yield_STRUCTURE,
+  n.core = 4 
+)
+
+
+#Set significant threshold
+gwas_yield_STRUCTURE <- set.threshold(
+  data = gwas_yield_STRUCTURE,
+  method = "Bonferroni",
+  level = 0.05,
+  n.core = 4
+)
+```
+
+Once GWASpoly has been completed, Manhattan and QQ plots can be made.
+
+```{r}
+#Manhattan plots
+pdf("GWAS/Yield/manhattan_yield_STRUCTURE_additive.pdf", width = 8, height = 6)
+manhattan.plot(gwas_yield_STRUCTURE, traits="Yield", models="additive")
+dev.off()
+
+pdf("GWAS/Yield/manhattan_yield_STRUCTURE_general.pdf", width = 8, height = 6)
+manhattan.plot(gwas_yield_STRUCTURE, traits="Yield", models="general")
+dev.off()
+
+pdf("GWAS/Yield/manhattan_yield_STRUCTURE_1domalt.pdf", width = 8, height = 6)
+manhattan.plot(gwas_yield_STRUCTURE, traits="Yield", models="1-dom-alt")
+dev.off()
+
+pdf("GWAS/Yield/manhattan_yield_STRUCTURE_1domref.pdf", width = 8, height = 6)
+manhattan.plot(gwas_yield_STRUCTURE, traits="Yield", models="1-dom-ref")
+dev.off()
+
+pdf("GWAS/Yield/manhattan_yield_STRUCTURE_2domalt.pdf", width = 8, height = 6)
+manhattan.plot(gwas_yield_STRUCTURE, traits="Yield", models="2-dom-alt")
+dev.off()
+
+pdf("GWAS/Yield/manhattan_yield_STRUCTURE_2domref.pdf", width = 8, height = 6)
+manhattan.plot(gwas_yield_STRUCTURE, traits="Yield", models="2-dom-ref")
+dev.off()
+
+
+#QQ plot
+pdf("GWAS/Yield/QQ_yield_STRUCTURE.pdf", width = 8, height = 6)
+qq.plot(gwas_yield_STRUCTURE, trait = "Yield")
+dev.off()
+```
+
+Then, create an SNP size effect table using the GWASpoly results.
+
+```{r}
+models <- c("additive", "general", "1-dom-alt", "1-dom-ref", "2-dom-alt", "2-dom-ref")
+
+gwas_yield_STRUCTURE_results <- data.frame()
+
+#Loop over models
+for (model in models) {
+  #Get the threshold for the current model
+  threshold <- gwas_yield_STRUCTURE@threshold["Yield", model]
+  
+  #Create a temporary results table for the current model
+  temp_results <- data.frame(
+    SNP = gwas_yield_STRUCTURE@map$Marker,
+    Chromosome = gwas_yield_STRUCTURE@map$Chrom,
+    Position = gwas_yield_STRUCTURE@map$Position,
+    Model = model,
+    Effect = gwas_yield_STRUCTURE@effects$Yield[[model]],
+    Pvalue = gwas_yield_STRUCTURE@scores$Yield[[model]],
+    Significant = gwas_yield_STRUCTURE@scores$Yield[[model]] >= threshold
+  )
+  
+  #Add to final results
+  gwas_yield_STRUCTURE_results <- rbind(gwas_yield_STRUCTURE_results, temp_results)
+}
+
+# Save as CSV
+write.csv(
+  gwas_yield_STRUCTURE_results,
+  "GWAS/Yield/yield_STRUCTURE_snp_effect_table.csv",
+  row.names = FALSE
+)
+```
+
+Using this file, filter the Significant column for 'TRUE' values only, and use these for compiling a table for the significant SNPs for Yield. GWASpoly for Yield using STRUCTURE also found 6 significant SNPs across chromosomes 6 and 7.
+
+```{r}
+# Load the SNP effect table
+gwas_yield_STRUCTURE_results <- read.csv("GWAS/Yield/yield_STRUCTURE_snp_effect_table.csv", stringsAsFactors = FALSE)
+
+# Filter for significant SNPs (Significant == TRUE)
+significant_snps <- gwas_yield_STRUCTURE_results[gwas_yield_STRUCTURE_results$Significant == TRUE, ]
+
+# Select relevant columns for the table
+significant_snps_table <- significant_snps[, c("SNP", "Chromosome", "Position", "Model", "Effect", "Pvalue", "Significant")]
+
+# Sort by Chromosome and Position for clarity
+significant_snps_table <- significant_snps_table[order(significant_snps_table$Chromosome, significant_snps_table$Position), ]
+
+# Display the table
+print(significant_snps_table)
+
+# Optionally, save the table to a CSV file
+write.csv(significant_snps_table, "GWAS/Yield/significant_snps_yield_STRUCTURE.csv", row.names = FALSE)
+```
+

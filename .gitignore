@@ -1,0 +1,35 @@
+# R / RStudio
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+
+# Data files (large / sensitive)
+data/*.csv
+data/*.xlsx
+data/*.xls
+
+# Output (reproducible from scripts)
+output/
+figures/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+*~
+*.swp
+*.tmp
+
+# Rendered output
+*_cache/
+*_files/
+*.html
+
+# Binary
+*.pdf
+*.tiff
+*.png
+*.jpg

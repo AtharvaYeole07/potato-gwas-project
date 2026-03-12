@@ -1,0 +1,983 @@
+---
+title: "DAPC"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#to avoid unable to open connection to X11 display error when plotting
+options(bitmapType = "cairo")
+```
+
+# Intro
+
+The adegenet R package is used for Multivariate Analysis of Genetic Markers and can be used to store, process and explore the relevant data
+
+-   The 'genind' class handles varying ploidy and hierarchical population structure
+-   The 'genpop' class handles alleles counts by populations
+-   The 'genlight' class handles genome-wide SNP data
+
+CRAN: <https://cran.r-project.org/web/packages/adegenet/index.html>
+
+Manual: <https://cran.r-project.org/web/packages/adegenet/adegenet.pdf>
+
+Github: <https://github.com/thibautjombart/adegenet>
+
+Webpage: <http://adegenet.r-forge.r-project.org>
+
+```{r, message=FALSE}
+#install.packages("adegenet")
+library(adegenet) #for Multivariate Analysis of Genetic Markers
+library(readxl) #for loading data from excel files
+library(tidyverse) #for data manipulation
+library(ggpubr) #create publication ready plots, good for multi-panel figures (ggarange)
+```
+
+# Load Data
+
+Here we load the required data from the raw_data folder within this project.
+
+The data consists of:
+
+-   Genotype dosage data for the potato panel used in Sharma et al., 2018
+-   SNP chromosome and position
+
+### Gene dosage
+
+```{r}
+#load gene dosage data
+gene_dosage <- read.csv(file = "sharma_genotype_reduced_recoded.csv")
+
+#prep data
+gene_dosage <- 
+  gene_dosage %>%
+  column_to_rownames(var = "Variety.name") %>% #convert cultivar column to rownames
+  mutate_all(~na_if(., -9)) #replace -9 with NA
+```
+
+### SNP position
+
+```{r}
+#load SNP positions
+SNP_pos <- read_excel(path = "sharma_SNP_positions.xlsx", sheet = "annotation")
+
+#store chromosomes as vector
+chromosome <- SNP_pos$chr_v403
+
+#store SNP base positions as vector
+position <- SNP_pos$position
+```
+
+# Filter data
+
+First we shall filter out SNPs with >20 % missing data (note this matches
+the approach used in Sharma et al., 2018)
+
+```{r, message=FALSE}
+colSums(is.na(gene_dosage)) %>% #number of NAs for each SNP/col
+  as_tibble() %>% #convert to tibble
+  rename(Number_of_NAs = value) %>% #rename col
+  mutate(SNP = colnames(gene_dosage)) %>% #add col of SNP names
+  mutate(Percentage_NAs = (Number_of_NAs/nrow(gene_dosage)*100)) %>% #%NAs 
+  ggplot(mapping = 
+           aes(x = SNP, y = Percentage_NAs, #plot SNP vs % NA
+               label = SNP)) + #set up labels
+  geom_point() + #dotplot
+  geom_hline(yintercept = 20, col = "red") + #add 20% threshold 
+  scale_y_continuous(limits = c(0,50), breaks = seq(0,50,10)) + #adjust y-scale
+  ylab("Percentage (%) NAs")+
+  theme(
+    axis.line.y = element_line(), #add lines to axes
+    axis.text.x = element_blank(), #remove x-axis text to make clearer
+  )
+```
+
+On the graph the red line is a threshold of 20% missing data, based on the
+approach used in Sharma et al., 2018. However, its hard to tell how many SNPs 
+are missing more than 20% of the data so we can count them as follows.
+
+```{r}
+colSums(is.na(gene_dosage)) %>% #number of NAs for each SNP/col
+  as_tibble() %>% #convert to tibble
+  rename(Number_of_NAs = value) %>% #rename col
+  mutate(SNP = colnames(gene_dosage)) %>% #add col of SNP names
+  mutate(Percentage_NAs = (Number_of_NAs/nrow(gene_dosage)*100)) %>% #%NAs 
+  filter(Percentage_NAs >= 20) %>%
+  nrow() %>%
+  paste("SNPs have >=20% missing data")
+
+colSums(is.na(gene_dosage)) %>% #number of NAs for each SNP/col
+  as_tibble() %>% #convert to tibble
+  rename(Number_of_NAs = value) %>% #rename col
+  mutate(SNP = colnames(gene_dosage)) %>% #add col of SNP names
+  mutate(Percentage_NAs = (Number_of_NAs/nrow(gene_dosage)*100)) %>% #%NAs 
+  filter(Percentage_NAs < 20) %>%
+  nrow() %>%
+  paste("SNPs have <20% missing data and can be used for analysis")
+```
+
+We shall remove SNPs with >=20% missing data for subsequent analysis. 
+
+```{r}
+#vector of SNPs with <20% missing
+missing_filter_SNPs <- 
+  colSums(is.na(gene_dosage)) %>% #number of NAs for each SNP/col
+  as_tibble() %>% #convert to tibble
+  rename(Number_of_NAs = value) %>% #rename col
+  mutate(SNP = colnames(gene_dosage)) %>% #add col of SNP names
+  mutate(Percentage_NAs = (Number_of_NAs/nrow(gene_dosage)*100)) %>% #%NAs 
+  filter(Percentage_NAs < 20) %>%
+  pull(SNP)
+
+#create filtered dataset with >=20% missing/NA removed
+gene_dosage_NA_filtered <- gene_dosage %>%
+  select(all_of(missing_filter_SNPs))
+
+#filter SNP pos to match
+SNP_pos_NA_filtered <- SNP_pos %>%
+  filter(solcap_SNP_ID %in% colnames(gene_dosage_NA_filtered))
+```
+
+# Initial overview
+
+Before we can analyse the data in adegenet we need to create a genlight object
+as below. We shall do so using the gene_dosage data that has been filtered as 
+above.
+
+```{r}
+#use the new function with adegenet
+genlight <- new(Class = "genlight", #specify data class as genlight
+                gen = gene_dosage_NA_filtered, #input genotype data
+                chromosome = SNP_pos_NA_filtered$chr_v403, #input chromosomes for SNPs
+                position = SNP_pos_NA_filtered$position)  #input base positions for SNPs
+```
+
+Double check ploidy of first few samples:
+
+```{r}
+head(ploidy(genlight))
+```
+
+4 as expected for tetraploid potato.
+
+We can get an overview of the full dataset with the glPlot() function.
+
+```{r, eval=FALSE}
+dir.create("DAPC_PIC_output/", showWarnings = FALSE)
+#set up tiff to save plot
+tiff(file = "DAPC_PIC_output/glPlot.tiff", height = 1500, width = 1500, res = 100)
+
+#glplot to get data overview
+glPlot(genlight, 
+       legend = FALSE) #remove legend
+
+dev.off()
+```
+
+Note white squares indicate missing data.
+
+We can also visualize the distribution of SNPs in the genome.
+
+```{r}
+#set up pdf to save plot
+pdf(file = "DAPC_PIC_output/SNP_dist.pdf", width = 23, height = 20)
+
+#visualise SNP distribution
+snpposi.plot(
+  position(genlight), #SNP base position
+  genome.size = 100000000, #unsure on this = 840Mb or 4x840Mb
+  codon = TRUE) + #show codon position
+  ylab("Density of SNPs") + #add y-lab
+  ggtitle(NULL) + #remove title
+  theme(legend.position = "bottom", #legend at bottom
+        panel.grid.major = element_blank(), #remove major grid lines
+        panel.grid.minor = element_blank(), #remove minor grid lines
+        axis.line = element_line(), #add lines to axes
+        axis.text.x = element_text(size = 40), #larger x axis text
+        axis.title.x = element_text(size = 40), #larger x axis title
+        axis.text.y = element_text(size = 40), #larger y axis text
+        axis.title.y = element_text(size = 40) #larger y axis title
+        )
+  
+dev.off()
+```
+
+# PCA
+
+Looks at the overall variance in the data.
+
+### initial PCA
+```{r}
+#use glPca function, by default data is centered to mean of 0 but NOT scaled
+PCA <- glPca(genlight, nf = 10) #nf = 10, retain 10 PCs as starting point
+```
+
+
+### scree plot
+```{r}
+#set up pdf to save plot
+pdf(file = "DAPC_PIC_output/PCA_scree.pdf")
+
+colours = c("black", "red") #set up colour coding
+
+full_scree <-
+  as_tibble(PCA$eig) %>% #convert eigenvalues to tibble
+  mutate(PC = 1:length(PCA$eig)) %>% #add col of PCs
+  mutate(colour = c(rep("black", 3), "red", rep("black", length(PCA$eig)-4))) %>% #elbow = red, rest black
+  ggplot()+
+  geom_point(mapping = aes(x = PC, y = value, colour = colour))+ #plot PC v eigenvalue as points
+  scale_color_manual(values = colours)+ #use own colour coding for points
+  geom_line(mapping = aes(x = PC, y = value))+ #plot PC v eigenvalue as line
+  ggtitle("All PCs")+ #add title
+  ylab("Eigenvalue")+ #add y axis lable
+  scale_y_continuous(limits = c(0, 10))+ #adjust y-axis limits
+  theme(legend.position = "none", #remove legend
+        panel.grid.major = element_blank(), #remove major grid lines
+        panel.grid.minor = element_blank(), #remove minor grid lines
+        axis.line = element_line()) #add lines to axes
+
+full_scree
+
+zoom_scree <-
+  as_tibble(PCA$eig) %>% #convert eigenvalues to tibble
+  mutate(PC = 1:length(PCA$eig)) %>% #add col of PCs
+  mutate(colour = c(rep("black", 3), "red", rep("black", length(PCA$eig)-4))) %>% #elbow = red, rest black
+  filter(PC <= 25) %>% #filter to only first 25 PCs
+  ggplot()+
+  geom_point(mapping = aes(x = PC, y = value, colour = colour))+ #plot PC v eigenvalue as points
+  scale_color_manual(values = colours)+ #use own colour coding for points
+  geom_line(mapping = aes(x = PC, y = value))+ #plot PC v eigenvalue as line
+  ggtitle("First 25 PCs")+ #add title
+  ylab(NULL)+ #remove y axis lable
+  scale_y_continuous(limits = c(0, 10))+ #adjust y-axis limits
+  theme(legend.position = "none", #remove legend
+        panel.grid.major = element_blank(), #remove major grid lines
+        panel.grid.minor = element_blank(), #remove minor grid lines
+        axis.line = element_line()) #add lines to axes
+
+zoom_scree
+
+dev.off()
+```
+
+Looks as though the "elbow" in the scree plot occurs at 4 PCs so will retain this many. We can check how much variance this retains...
+
+```{r}
+as_tibble(PCA$eig) %>%
+  mutate(PC = 1:length(PCA$eig)) %>%
+  mutate(percent_variance = cumsum(value)/sum(value)*100) %>%
+  filter(PC == 4)
+```
+
+### final PCA
+
+```{r}
+PCA <- glPca(genlight, nf = 4) #nf = 4, retain 4 PCs
+
+PCA
+```
+
+### scatter plot of PCs/scores
+```{r}
+#set up pdf to save plot
+pdf(file = "DAPC_PIC_output/PCA_scatter.pdf")
+
+PC1v2 <- 
+  as_tibble(PCA$scores) %>% #convert PCA scores to tibble
+  ggplot()+
+  geom_point(mapping = aes(x = PC1, y = PC2))+ #plot PC1 v PC2
+  xlab(paste0("PC1 (", round(PCA$eig[1]/sum(PCA$eig)*100,2),"%)"))+ #xlab with % variance
+  ylab(paste0("PC2 (", round(PCA$eig[2]/sum(PCA$eig)*100,2),"%)"))+ #ylab with % variance
+  theme(panel.grid.major = element_blank(), #remove major grid lines
+         panel.grid.minor = element_blank(), #remove minor grid lines
+         axis.line = element_line()) #add lines to axes
+
+PC1v2 
+
+dev.off()
+```
+
+### loadings plot
+
+First we plot loading plots of the data for PC1-2
+
+```{r}
+#set up pdf to save plot
+pdf(file = "DAPC_PIC_output/PCA_loadings.pdf")
+
+PC1_loadings <- loadingplot(PCA, 
+                            threshold = 0.0025, #set threshold to 0.0025
+                            srt = 1, #horizontal labels
+                            cex.lab = 1, #label size
+                            main = "Loading plot for PC1") #add title
+
+PC2_loadings <- loadingplot(PCA, 
+                            axis = 2, #plot PC2
+                            threshold = 0.0025, #set threshold to 0.0025
+                            srt = 1, #horizontal labels
+                            cex.lab = 1, #label size
+                            main = "Loading plot for PC2") #add title
+
+dev.off()
+```
+
+Next we save the SNPs above the threshold with their loading values.
+
+```{r, eval=FALSE}
+#PC1 data
+PC1_loadings_0.0025 <- 
+  tibble(SNP_index = unname(PC1_loadings$var.names), #extract index
+         loading_value = PC1_loadings$var.values) #extract loading values
+
+solcap_SNP_ID <-
+  data.frame(solcap_SNP_ID = genlight@loc.names) %>% #extract SNP name
+  rownames_to_column() %>%
+  filter(rowname %in% PC1_loadings_0.0025$SNP_index) %>% #SNPs matching index
+  select(solcap_SNP_ID) %>%
+  pull()
+
+PC1_loadings_0.0025 <- cbind(PC1_loadings_0.0025, solcap_SNP_ID) #merge IDs and loadings
+
+PC1_loadings_0.0025 <- 
+  PC1_loadings_0.0025 %>%
+  mutate(PC = rep("PC1", nrow(PC1_loadings_0.0025))) #add LD col for merging
+
+#PC2 data
+PC2_loadings_0.0025 <- 
+  tibble(SNP_index = unname(PC2_loadings$var.names), #extract index
+         loading_value = PC2_loadings$var.values) #extract loading values
+
+solcap_SNP_ID <-
+  data.frame(solcap_SNP_ID = genlight@loc.names) %>% #extract SNP name
+  rownames_to_column() %>%
+  filter(rowname %in% PC2_loadings_0.0025$SNP_index) %>% #SNPs matching index
+  select(solcap_SNP_ID) %>%
+  pull()
+
+PC2_loadings_0.0025 <- cbind(PC2_loadings_0.0025, solcap_SNP_ID) #merge IDs and loadings
+
+PC2_loadings_0.0025 <- 
+  PC2_loadings_0.0025 %>%
+  mutate(PC = rep("PC2", nrow(PC2_loadings_0.0025))) #add LD col for merging
+
+#merge dfs and save
+all_PC_loadings_0.0025 <-
+  rbind(PC1_loadings_0.0025, PC2_loadings_0.0025)
+
+write.csv(all_PC_loadings_0.0025, file = "DAPC_PIC_output/all_PC_loadings_0.0025.csv",
+          row.names = FALSE)
+```
+
+# DAPC population analysis
+
+Prior to DAPC analysis we shall filter by PIC value to allow direct comparison
+to the STRUCTURE method. This is because in order to run STRUCTURE in a timely
+manner we had to reduce the dataset using a PIC threshold of >0.4.
+
+```{r}
+#count total alleles in data (without SNPs with >20% missing data)
+total_alleles <- 4 * nrow(gene_dosage_NA_filtered)
+
+#filter SNPs based on PIC values
+PIC_SNPs <- gene_dosage_NA_filtered %>%
+  
+  reframe(
+    
+    #create col for SNP name
+    SNP = colnames(gene_dosage_NA_filtered),
+    
+    #calculate allele frequencies
+    freq_B_allele = colSums(., na.rm = TRUE)/total_alleles,
+    freq_A_allele = colSums(4 - ., na.rm = TRUE)/total_alleles,
+    
+    #calculate PIC
+    PIC = 1 - (freq_A_allele^2 + freq_B_allele^2) - (2 * (freq_A_allele^2 * freq_B_allele^2))
+    ) %>%
+  
+  filter(PIC > 0.4) %>% #filter to SNPs with PIC >0.4, see STRUCTURE_prep code for justification
+  
+  pull(SNP) #select SNP names for filtering
+
+#subset dosage data to those SNPs with a PIC >0.4
+gene_dosage_PIC_filtered <- 
+  gene_dosage_NA_filtered %>%
+  select(all_of(PIC_SNPs))
+
+#also subset SNP positions to match
+SNP_pos_PIC_filtered <-
+  SNP_pos %>%
+  filter(solcap_SNP_ID %in% PIC_SNPs)
+```
+
+We now create a new genlight object based on this PIC filtered data.
+
+```{r}
+#use the new function with adegenet
+genlight_PIC_filtered <- new(Class = "genlight", #specify data class as genlight
+                gen = gene_dosage_PIC_filtered, #input genotype data
+                chromosome = SNP_pos_PIC_filtered$chr_v403, #input chromosomes for SNPs
+                position = SNP_pos_PIC_filtered$position)  #input base positions for SNPs
+```
+
+Before performing DAPC will check how this filtering has effected the SNP
+distribution.
+
+```{r}
+#set up pdf to save plot
+pdf(file = "DAPC_PIC_output/SNP_dist_PIC_filter.pdf", width = 23, height = 20)
+
+#visualise SNP distribution
+snpposi.plot(
+  position(genlight_PIC_filtered), #SNP base position
+  genome.size = 100000000, #unsure on this = 840Mb or 4x840Mb
+  codon = TRUE) + #show codon position
+  ylab("Density of SNPs") + #add y-lab
+  ggtitle(NULL) + #remove title
+  theme(legend.position = "bottom", #legend at bottom
+        panel.grid.major = element_blank(), #remove major grid lines
+        panel.grid.minor = element_blank(), #remove minor grid lines
+        axis.line = element_line(), #add lines to axes
+        axis.text.x = element_text(size = 40), #larger x axis text
+        axis.title.x = element_text(size = 40), #larger x axis title
+        axis.text.y = element_text(size = 40), #larger y axis text
+        axis.title.y = element_text(size = 40) #larger y axis title
+        )
+  
+dev.off()
+```
+
+A major aim of many GWAS studies is to identify populations, or more largely genetic clusters, and then describe these clusters.
+
+In a standard multivariate analysis...
+
+-   total variance = (variance between groups) + (variance within groups)
+
+Or
+
+-   VAR(X) = B(X) + W(X).
+
+For PCA, PCoA or MDS we focus on total variance/VAR(X). DAPC allow us to optimize variance between groups/B(X) whilst minimising variance within groups/W(X). It does this with discriminant functions which show differences between groups as best as possible while minimizing variation within clusters.
+
+DAPC requires prior groups to be defined, therefore one must first identify clusters in the data. This can be done with k-means clustering.
+
+### k-means
+
+Performs clustering such that 'k' clusters maximize variance between groups/B(X). To do this we run the find.clusters command. This first transforms the data with PCA (this reduces the number of variables and speeds up calculations).
+
+```{r, eval=FALSE}
+#set up pdf to save plots
+pdf(file = "DAPC_PIC_output/kmeans_clustering.pdf")
+
+clusters <- 
+  find.clusters(genlight_PIC_filtered,
+                method = "kmeans" #default is kmeans, can use ward but less efficient
+                ) 
+
+dev.off()
+```
+
+We running find.clusters it is best to select all principal components (selecting less simply saves computation time).This was done interactively based on variance explained plot, a number greater than the max retained PCs on the plot was used (i.e. max just below 300, so do 300 to select all).
+
+You then select the required number of clusters based on a plot of BIC (Bayesian Information Criterion) values vs number of clusters. The optimal BIC is indicated by the "elbow" of the curve (i.e. where the BIC is lowest/a slope change occurs). The number of clusters at this point was 4 with a BIC value of 1226.874.
+
+### choosing the required PCs
+
+Based on the k-means clustering we shall use 4 clusters for DAPC. Unlike k-means clustering retaining too many PCs for DAPC is bad (it can lead to over-fitting). Basically you need to minimize the PCs without losing too much variance.
+
+We can use what is known as a proportional variance criterion (Thia, 2023) to capture a set amount of genotypic variance. Based on the scree plot generated above for k-means around 125 PCs should be about right as this looks to explain about 80% of the variance. We shall run an initial DAPC analysis with 125 PCs
+
+```{r, eval=FALSE}
+#set up pdf to save plots
+pdf(file = "DAPC_PIC_output/initial_dapc.pdf")
+
+initial_dapc <-  
+  dapc(genlight_PIC_filtered, 
+       pop = clusters$grp, #use the clusters identified with k-means
+       n.pca = 125 #retain 125 PC in PCA step
+       )
+
+dev.off()
+```
+
+Note we interactively selected the number of discriminants to keep based on the barplot of eigenvalues. For a small number of clusters (say <10) we can just keep all of them (in this case 3).
+
+The problem with a proportional variance criterion is that unless there are very large differences between populations it usually overestimates the optimal number of PCs (Thia, 2023). Thus, we can also use an optimization function within adegenet to chose the optimal number of PCs.
+
+```{r, eval=FALSE}
+#set up pdf to save plots
+pdf(file = "DAPC_PIC_output/DAPC_optim_a_score.pdf")
+
+optim_PC <- 
+  optim.a.score(initial_dapc,
+                smart = FALSE, #check all PCs in given range
+                n.pca = c(1:125), #use the 125 PCs from above
+                n.da = 3) #use 3 discriminants as with above
+
+dev.off()
+```
+
+Based on this optimization we should use significantly less PCs, in this case 7 PCs as opposed to 125. 
+
+We can also use the results of the PCA to help visually confirm the optimal PCs to retain...
+
+```{r, eval=FALSE}
+#set up pdf to save plots
+pdf(file = "DAPC_PIC_output/DAPC_optim_PCA.pdf")
+
+#set up own colours for plot
+colours <- c("#D81B60", "#1E88E5", "#FFC107", "#004D40")
+
+#PC1 vs PC2
+PC1v2 <- 
+  as_tibble(PCA$scores) %>% #convert PCA scores to tibble
+  mutate(sample = rownames(PCA$scores)) %>% #add col of sample names
+  mutate(Cluster = clusters$grp) %>% #add col for clusters from k-means
+  ggplot()+
+  xlab(paste0("PC1 (", round(PCA$eig[1]/sum(PCA$eig)*100,2),"%)"))+ #xlab with % variance
+  ylab(paste0("PC2 (", round(PCA$eig[2]/sum(PCA$eig)*100,2),"%)"))+ #ylab with % variance
+  geom_point(mapping = aes(x = PC1, y = PC2, colour = Cluster))+ #scatter plot of PCs colour coded by k-means cluster
+  scale_color_manual(values = colours)+ #use own colors
+  theme(panel.grid.major = element_blank(), #remove major grid lines
+         panel.grid.minor = element_blank(), #remove minor grid lines
+         axis.line = element_line()) #add lines to axes
+
+PC1v2
+
+#PC3 vs PC4
+PC3v4 <-
+  as_tibble(PCA$scores) %>% #convert PCA scores to tibble
+  mutate(sample = rownames(PCA$scores)) %>% #add col of sample names
+  mutate(Cluster = clusters$grp) %>% #add col for clusters from k-means
+  ggplot()+
+  xlab(paste0("PC3 (", round(PCA$eig[3]/sum(PCA$eig)*100,2),"%)"))+ #xlab with % variance
+  ylab(paste0("PC4 (", round(PCA$eig[4]/sum(PCA$eig)*100,2),"%)"))+ #ylab with % variance
+  geom_point(mapping = aes(x = PC3, y = PC4, colour = Cluster))+ #scatter plot of PCs colour coded by k-means cluster
+  scale_color_manual(values = colours)+ #use own colors
+  theme(panel.grid.major = element_blank(), #remove major grid lines
+         panel.grid.minor = element_blank(), #remove minor grid lines
+         axis.line = element_line()) #add lines to axes
+
+PC3v4
+
+dev.off()
+```
+
+PCs beyond a certain point capture within group rather than between group variation. At this point population clusters begin to collapse into a single homogeneous group (Thia, 2023).
+Since there still seems to be some clustering at PC 3 v 4 (clusters 1+4 separate from clusters 2+3) will confirm by plotting PC5 v PC6. To do so will need to run a new PCA retaining 6 PCs (as have only retained 4 in main PCA analysis).
+
+```{r, eval=FALSE}
+#set up pdf to save plots
+pdf(file = "DAPC_PIC_output/DAPC_optim_PCA_PC5v6.pdf")
+
+PCA_6PC <- glPca(genlight, nf = 6)
+
+#set up own colours for plot
+colours <- c("#D81B60", "#1E88E5", "#FFC107", "#004D40")
+
+PC5v6 <-
+  as_tibble(PCA_6PC$scores) %>% #convert PCA scores to tibble
+  mutate(sample = rownames(PCA_6PC$scores)) %>% #add col of sample names
+  mutate(Cluster = clusters$grp) %>% #add col for clusters from k-means
+  ggplot()+
+  xlab(paste0("PC5 (", round(PCA_6PC$eig[5]/sum(PCA_6PC$eig)*100,2),"%)"))+ #xlab with % variance
+  ylab(paste0("PC6 (", round(PCA_6PC$eig[6]/sum(PCA_6PC$eig)*100,2),"%)"))+ #ylab with % variance
+  geom_point(mapping = aes(x = PC5, y = PC6, colour = Cluster))+ #scatter plot of PCs colour coded by k-means cluster
+  scale_color_manual(values = colours)+ #use own colors
+  theme(panel.grid.major = element_blank(), #remove major grid lines
+         panel.grid.minor = element_blank(), #remove minor grid lines
+         axis.line = element_line()) #add lines to axes
+
+PC5v6
+
+dev.off()
+```
+As expected visual inspection of the PCA plot for PC5 v PC6 demonstrates the collapse of population clusters. Thus selecting any additional PCs will likely lead to over-fitting the DAPC model. Thia (2023) finds that the point at which this occurs is almost always at the level of k, where k is the number of population clusters. Thus, they recommend retaining k-1 PCs (which in this case is 4-1 = 3).
+
+Overall, we several conflicting choices for the number of PCs to retain...
+
+- DAPC optimization suggests retaining 7 PCs.
+- PCA suggests retaining around 4-5 PCs.
+- k-means cluster/the k-1 criterion (Thia, 2023) suggest retaining 3 PCs.
+
+To err on the side of caution (for example k-means clusters only 'estimates' k) will retain PCs between the highest (7) and lowest (3) of these values. Since the average of the two is 5, retaining 5 PCs should be about right.
+
+### run dapc
+
+```{r, eval=FALSE}
+#set up pdf to save plots
+pdf(file = "DAPC_PIC_output/final_dapc.pdf")
+
+final_dapc <-  
+  dapc(genlight_PIC_filtered, 
+       pop = clusters$grp, #use the clusters identified with k-means
+       n.pca = 5 #retain 5 PC in PCA step
+       ) 
+
+dev.off()
+```
+
+Note as before we interactively selected the number of discriminants to keep based on the barplot of eigenvalues. Since we had a small number of clusters (<10) we just kept all of them (in this case 3).
+
+We can check how much variance these 5 PCs have retained as below.
+
+```{r}
+as_tibble(PCA$eig) %>%
+  mutate(PC = 1:length(PCA$eig)) %>%
+  mutate(percent_variance = cumsum(value)/sum(value)*100) %>%
+  filter(PC == 5)
+```
+
+### dapc scatterplot
+
+```{r, eval=FALSE}
+#set up pdf to save plots
+pdf(file = "DAPC_PIC_output/dapc_scatter.pdf", width = 10)
+
+#set up own colours for plot
+colours <- c("#D81B60", "#1E88E5", "#FFC107", "#004D40")
+
+#use the scatter command
+scatter(final_dapc,
+        scree.da = FALSE, #remove DA eignevalue plot
+        col=colours, #use to desired colours
+        pch = c(0,1,5,2), #use desired shapes
+        cstar = 0, #remove line segments connecting point with ellipses
+        mstree = TRUE, #add minimum spanning tree to visualise squared distance between clusters
+        clabel = FALSE, #remove cluster labels
+        leg = TRUE, #add legend
+        posi.leg = "topleft", #specify legend position
+        txt.leg = paste ("Cluster",1:4), #specify text for legend
+        )  
+
+#add crosses to indicated the centre of each cluster
+points(final_dapc$grp.coord[,1], final_dapc$grp.coord[,2], pch=4,
+       cex=2, lwd=2, col="black")
+
+#plot PCA eigenvalues
+
+temp <- final_dapc$pca.eig #select eigenvalues
+temp <- 100* cumsum(temp)/sum(temp) #calculate cumulative var
+temp <- temp[1:5] #select the 5 retained PCs
+temp <- as.data.frame(temp) #convert to data frame
+temp$label <- paste0(round(temp$temp, 2), "%") #add column for bar labels
+
+
+p <- barplot(temp$temp, #barplot
+        col="black", #bars in black
+        ylim = c(0,100), #y limits
+        names.arg = c(1:5), #label x-axis with PC numbers
+        xlab="PCA axis", #x-axis title
+        ylab="Cumulated variance (%)", #y-axis title
+        main = "Eigenvalue plot for retained PCs"
+        ) 
+
+text(x = p, #add labels to bars on graph
+     y = temp$temp + 3.5, #offset from top of bars
+     labels = temp$label) #specify labels
+
+dev.off()
+```
+
+We shall also count the number of individuals per cluster in the scatterplot. We 
+can do this for both prior group assignment (results of K-means) and posterior 
+group assignment (reassignment following DAPC).
+
+```{r, eval=FALSE}
+#prior assignment
+prior <- final_dapc[["grp"]] %>% #prior/k-means group assignment
+  as_tibble() %>% #convert to tibble
+  count(value) %>% #number in each cluster
+  mutate(percent = round(n/sum(n)*100, 1)) #percent in each cluster to 1dp
+
+#posterior assignment
+posterior <- final_dapc[["assign"]] %>% #posterior/DAPC group assignment
+  as_tibble() %>% #convert to tibble
+  count(value) %>% #number in each cluster
+  mutate(percent = round(n/sum(n)*100, 1)) #percent in each cluster to 1dp
+
+#merge the two and save
+rbind(prior, posterior) %>%
+  mutate(prior_or_posterior = c(rep("prior", 4), rep("posterior",4))) %>%
+  write.csv(., file = "DAPC_PIC_output/group_assignments.csv", row.names = FALSE)
+
+```
+
+### dapc discriminants
+
+We can also check how each of the discriminant functions seperate the data. In this case this will give 3 plots, one for each discriminant function.
+
+```{r, eval=FALSE}
+#set up pdf to save plots
+pdf(file = "DAPC_PIC_output/dapc_discriminant_plots.pdf")
+
+#set up own colours for plot
+colours <- c("#D81B60", "#1E88E5", "#FFC107", "#004D40")
+
+scatter(final_dapc, 1, 1, #plot discriminant function 1
+        col=colours, #use to desired colours
+        scree.da = FALSE, #remove DA eignevalue plot
+        leg = TRUE, #add legend
+        txt.leg = paste ("Cluster",1:4), #specify text for legend
+        solid=0.6) #adjust opacity
+
+scatter(final_dapc, 2, 2, #plot discriminant function 2
+        col=colours, #use to desired colours
+        scree.da = FALSE, #remove DA eignevalue plot
+        leg = TRUE, #add legend
+        txt.leg = paste ("Cluster",1:4), #specify text for legend
+        solid=0.6) #adjust opacity
+
+scatter(final_dapc, 3, 3, #plot discriminant function 3
+        col=colours, #use to desired colours
+        scree.da = FALSE, #remove DA eignevalue plot
+        leg = TRUE, #add legend
+        txt.leg = paste ("Cluster",1:4), #specify text for legend
+        solid=0.6) #adjust opacity
+
+dev.off()
+```
+
+### dapc variable contributions
+
+Next we can look at allele contribution for each discriminant function. 
+
+First we plot loading plots of the data for LD1-3
+
+```{r, eval=FALSE}
+#set up pdf to save plots
+pdf(file = "DAPC_PIC_output/dapc_loadings.pdf")
+
+#LD1 plot
+LD1_loadings_0.005 <- loadingplot(final_dapc$var.contr[,1], #LD1 loadings
+                            threshold = 0.005, #set threshold to 0.005
+                            srt = 1, #horizontal labels
+                            cex.lab = 1, #label size
+                            main = "Loading plot for LD1") #add title
+
+#LD2 plot
+LD2_loadings_0.005 <- loadingplot(final_dapc$var.contr[,2], #LD2 loadings
+                                   threshold = 0.005, #set threshold to 0.005
+                                   srt = 1, #horizontal labels
+                                   cex.lab = 1, #label size
+                                   main = "Loading plot for LD2") #add title
+
+#LD3 plot
+LD3_loadings_0.005 <- loadingplot(final_dapc$var.contr[,3], #LD3 loadings
+                                   threshold = 0.005, #set threshold to 0.005
+                                   srt = 1, #horizontal labels
+                                   cex.lab = 1, #label size
+                                   main = "Loading plot for LD3") #add title
+dev.off()
+```
+
+Next we save the SNPs above the threshold with their loading values.
+
+```{r, eval=FALSE}
+#LD1 data
+LD1_loadings_0.005 <- 
+  tibble(SNP_index = unname(LD1_loadings_0.005$var.names), #extract index
+         loading_value = LD1_loadings_0.005$var.values) #extract loading values
+
+solcap_SNP_ID <-
+  data.frame(solcap_SNP_ID = genlight@loc.names) %>% #extract SNP name
+  rownames_to_column() %>%
+  filter(rowname %in% LD1_loadings_0.005$SNP_index) %>% #SNPs matching index
+  select(solcap_SNP_ID) %>%
+  pull()
+
+LD1_loadings_0.005 <- cbind(LD1_loadings_0.005, solcap_SNP_ID) #merge IDs and loadings
+
+LD1_loadings_0.005 <- 
+  LD1_loadings_0.005 %>%
+  mutate(LD = rep("LD1", nrow(LD1_loadings_0.005))) #add LD col for merging
+
+#LD2 data
+LD2_loadings_0.005 <- 
+  tibble(SNP_index = unname(LD2_loadings_0.005$var.names), #extract index
+         loading_value = LD2_loadings_0.005$var.values) #extract loading values
+
+solcap_SNP_ID <-
+  data.frame(solcap_SNP_ID = genlight@loc.names) %>% #extract SNP name
+  rownames_to_column() %>%
+  filter(rowname %in% LD2_loadings_0.005$SNP_index) %>% #SNPs matching index
+  select(solcap_SNP_ID) %>%
+  pull()
+
+LD2_loadings_0.005 <- cbind(LD2_loadings_0.005, solcap_SNP_ID) #merge IDs and loadings
+
+LD2_loadings_0.005 <- 
+  LD2_loadings_0.005 %>%
+  mutate(LD = rep("LD2", nrow(LD2_loadings_0.005))) #add LD col for merging
+
+#LD3 data
+LD3_loadings_0.005 <- 
+  tibble(SNP_index = unname(LD3_loadings_0.005$var.names), #extract index
+         loading_value = LD3_loadings_0.005$var.values) #extract loading values
+
+solcap_SNP_ID <-
+  data.frame(solcap_SNP_ID = genlight@loc.names) %>% #extract SNP name
+  rownames_to_column() %>%
+  filter(rowname %in% LD3_loadings_0.005$SNP_index) %>% #SNPs matching index
+  select(solcap_SNP_ID) %>%
+  pull()
+
+LD3_loadings_0.005 <- cbind(LD3_loadings_0.005, solcap_SNP_ID) #merge IDs and loadings
+
+LD3_loadings_0.005 <- 
+  LD3_loadings_0.005 %>%
+  mutate(LD = rep("LD3", nrow(LD3_loadings_0.005))) #add LD col for merging
+
+#merge dfs and save
+all_LD_loadings_0.005 <-
+  rbind(LD1_loadings_0.005, LD2_loadings_0.005, LD3_loadings_0.005)
+
+write.csv(all_LD_loadings_0.005, file = "DAPC_PIC_output/all_LD_loadings_0.005.csv",
+          row.names = FALSE)
+```
+
+### Membership probabilities
+
+We can plot membership probabilities in a similar manner to STRUCTURE.
+
+First we shall create a graph with all the cultivar names given, this will likely 
+not go in the final results but may still be useful for the supplementary 
+material.
+
+```{r, eval=FALSE}
+p1 <- as.data.frame(final_dapc[["posterior"]]) %>% #membership probabilities
+  
+  #convert rownames to ID col
+  rownames_to_column(var = "ID") %>% 
+  
+  #convert to long format
+  pivot_longer(cols = 2:5,
+               names_to = "Cluster") %>%
+  
+  #set cluster as factor and specify order to plot, cluster 1 at bottom
+  mutate(cluster = factor(Cluster, levels = c("1", "2", "3", "4"))) %>%
+  
+  #plot stacked bar chart
+  ggplot(mapping = aes(x = ID, y = value, fill = Cluster)) +
+  geom_col(position = "stack")+
+  scale_fill_manual(breaks = c("1", "2", "3", "4"), #alphabetical for legend
+                    values = c("#D81B60", "#1E88E5", "#FFC107", "#004D40"))+ #custom colours
+  ylab("Membership Probability") +
+  xlab(NULL)+
+  theme(
+    panel.grid.major = element_blank(), #remove major grid lines
+    panel.grid.minor = element_blank(), #remove minor grid lines
+    axis.line = element_line(), #add lines to axes
+    axis.text.x = element_text(size = 10, angle=90), #smaller + vertical x axis text
+    axis.text.y = element_text(size = 40), #larger y axis text
+    axis.title.y = element_text(size = 40), #larger y axis title
+    legend.text = element_text(size = 40),     # Increase legend text size
+    legend.title = element_text(size = 40),   # Increase legend title size
+    legend.key.size = unit(3, "cm")         # Increase size of legend key
+  )
+
+ggsave(filename = "DAPC_PIC_output/cluster_membership_graph_cultivar_names.pdf", p1, width = 40, height = 20)
+```
+
+Will also create a plot with just numeric ID for labels which is clearer for 
+presentation of final results.
+
+```{r, eval=FALSE}
+#create reduced list of cultivars
+reduced_cultivars <- genlight@ind.names[seq(1,282,40)]
+
+#edit original plot
+p2 <- 
+  
+  p1 +
+  
+  #reduce the number of labels + change to numeric ID
+  scale_x_discrete(breaks = reduced_cultivars, labels = seq(1,282,40))+ 
+  
+  xlab("Cultivar ID")+
+  
+  theme(
+    axis.text.x = element_text(size = 40, angle=0), #back to horizontal labels,
+    axis.title.x = element_text(size = 40), #larger x axis title
+    )
+
+ggsave(filename = "DAPC_PIC_output/cluster_membership_graph_numeric_IDs.pdf", p2, width = 30, height = 10)
+```
+
+We can also plot a graph of the most likely cluster for each individual in the dataset.
+
+```{r, eval=FALSE}
+p3 <- as.data.frame(final_dapc[["posterior"]]) %>% #membership probabilities
+  
+  #select max value + associated K for each individual
+  rowwise() %>%
+  mutate(
+    max_prob = max(c_across(everything())), # Max membership prob for individual
+    Cluster = names(.)[which.max(c_across(everything()))] #K associated with max value
+  ) %>%
+  ungroup() %>% # Ungroup to avoid issues with grouped data
+  
+  #convert rownames to ID col
+  rownames_to_column(var = "ID") %>% 
+  
+  #plotted bar chart
+  ggplot(mapping = aes(x = ID, y = max_prob, fill = Cluster)) +
+  geom_col(position = "dodge")+
+  scale_fill_manual(breaks = c("1", "2", "3", "4"), #numerical for legend
+                    values = c("#D81B60", "#1E88E5", "#FFC107", "#004D40"))+  #custom colours
+  scale_x_discrete(breaks = reduced_cultivars, labels = seq(1,282,40))+ #adjust x-axis breaks
+  scale_y_continuous(limits = c(0,1), breaks = seq(0,1,0.25))+ #adjust y-axis breaks
+  ylab("Membership Probability") +
+  xlab("Cultivar ID")+
+  theme(
+    panel.grid.major = element_blank(), #remove major grid lines
+    panel.grid.minor = element_blank(), #remove minor grid lines
+    axis.line = element_line(), #add lines to axes
+    axis.text.x = element_text(size = 40), #larger x axis text
+    axis.title.x = element_text(size = 40), #larger x axis title
+    axis.text.y = element_text(size = 40), #larger y axis text
+    axis.title.y = element_text(size = 40), #larger y axis title
+    legend.text = element_text(size = 40),     # Increase legend text size
+    legend.title = element_text(size = 40),   # Increase legend title size
+    legend.key.size = unit(3, "cm")         # Increase size of legend key
+  )
+
+ggsave(filename = "DAPC_PIC_output/most_likely_clusters.pdf", p3, width = 30, height = 10)
+```
+
+### Save population covariates
+
+For subsequent GWAS analysis both principal components from PCA and the 
+membership probabilities from DAPC can be used as population covariates.
+This allows one to better control for population structure during GWAS analysis.
+
+Here we shall save the PCs and membership probabilities for use in GWASpoly based
+GWAS analysis.
+
+- Save membership probabilities
+
+```{r, eval=FALSE}
+as.data.frame(final_dapc[["posterior"]]) %>%
+  rownames_to_column(var = "ID") %>%
+  write.csv(., file = "DAPC_PIC_output/DAPC_membership_probabilities.csv", row.names = FALSE)
+```
+
+- Save principal components (PCs). Note since we retained 5 PCs in DAPC will
+do the same here using the results of the PCA with 6 PCs
+
+```{r}
+as.data.frame(PCA_6PC[["scores"]][,1:5]) %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ID") %>%
+  write.csv(., file = "DAPC_PIC_output/PCA_principal_components.csv", row.names = FALSE)
+```
+
+# References
+
+JOMBART, T. (2008). â€˜adegenet: a R package for the multivariate analysis of genetic markers,â€™ Bioinformatics, 24(11), pp. 1403-5. <doi:10.1093/bioinformatics/btn129>.
+
+JOMBART, T., and AHMED, I. (2011). â€˜adegenet 1.3-1: new tools for the analysis of genome-wide SNP data,â€™ Bioinformatics, 27(21), pp. 3070-1. <doi:10.1093/bioinformatics/btr521>.
+
+THIA, J.A. (2023). â€˜Guidelines for standardizing the application of discriminant analysis of principal components to genotype data,â€™ Molecular Ecology Resources, 23(3), pp. 523-538. <doi:10.1111/1755-0998.13706>.
+
+SHARMA, S.K., MACKENZIE, K., MCLEAN, K., DALE, F., DANIELS, S., and BRYAN, G.J. (2018). â€˜Linkage Disequilibrium and Evaluation of Genome-Wide Association Mapping Models in Tetraploid Potato,â€™ G3 (Bethesda), 8(10), pp. 3185-3202. <doi:10.1534/g3.118.200377>.

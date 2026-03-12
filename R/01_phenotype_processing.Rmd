@@ -1,0 +1,1245 @@
+---
+title: "BLUEs"
+output: word_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Intro
+
+```{r, message=FALSE}
+library(readxl) #for loading data from excel files
+library(tidyverse) #for data manipulation
+library(lme4) #for linear models and BLUEs calculation
+```
+
+# Data overview
+
+Here we load the required data from the raw_data folder within this
+project.
+
+```{r}
+#load excel file of phenotype data
+phenotype <- read.csv(
+  file = "Alldata2016-2018 3sd NA_FINAL_NO_ISSUES.csv") 
+```
+
+First lets look at how many observations (rows) there are for each year.
+
+```{r}
+phenotype %>%
+  filter(Year == 2016) %>% #filter by year
+  nrow() #count number of rows/observations
+
+phenotype %>%
+  filter(Year == 2017) %>%
+  nrow()
+
+phenotype %>%
+  filter(Year == 2018) %>%
+  nrow()
+```
+
+Each year has 1128 rows so have the same number of observations.
+
+We can also check how many unique varieties are in the dataset.
+
+```{r}
+phenotype %>%
+  select(Variety.name) %>% #select all varieties
+  unique() %>% #select unique entries
+  nrow() #count rows/number of unique entries
+```
+
+There are 282 unique varieties in the dataset. Each of these varieties should 
+have 12 entries (as they were grown in 4 plots x 3 years). We can double check
+this as below.
+
+```{r}
+table(phenotype$Variety.name) %>% #create frequency table for each variety
+  as.data.frame() %>% #convert to data frame
+  filter(Freq == 12) %>% #select those that appear 12 times
+  nrow() #count rows/number of varieties that appear 12 times
+```
+
+All 282 varieties appear 12 times as expected.
+
+In the data we have several info columns and these are shown below...
+
+```{r}
+head(phenotype[,1:6])
+```
+We also have the measurements for 140 different traits e.g.
+
+```{r}
+head(phenotype[,7:9])
+```
+# Add index column
+
+For subsequent analysis it will be helpful to add an index for the varieties to
+save typing out full variety names.
+
+```{r}
+phenotype <- phenotype %>%
+  mutate(Genotype_ID = rep(1:282, each = 12)) %>% #282 vars each repeated x12
+  relocate(Genotype_ID, before = Variety.name) %>% #move before variety.name col
+  rename(Variety.name = before) #rename before col back to variety.name
+         
+head(phenotype[1:6]) #check result
+```
+
+# Traits of interest
+
+Since we have data for 140 different traits we will focus on those of particular
+interest.
+
+These traits are:
+
+- Yield (Kg)
+- Max Max height (m) = maximum recorded height for max/highest point of plant
+- Max Ave height (m) = maximum average height
+- Max_area_plant (m2) = maximum plant area
+- Max_volume_plant (m3) = max plant volume
+
+First create a vector of traits of interest for future use.
+
+```{r}
+traits_of_interest <- phenotype %>%
+  select(Yield_Kg, 
+         Max_Max_height_m,
+         Max_Ave_height_m,
+         Max_area_plant_m2,
+         Max_volume_plant_m3) %>%
+  colnames()
+```
+
+Since certain traits in the data are not measured every year we need to check 
+when our traits of interest have been measured. We can do this as follows...
+
+### 2016
+
+```{r}
+phenotype %>%
+  filter(Year == 2016) %>% #filter by year
+  select(all_of(traits_of_interest)) %>% #select the traits of interest
+  sapply(., \(x) is.na(x)) %>% #logical vector checking if entries are NA
+  as.data.frame() %>% #convert to df
+  colSums() %>% #calculate colsums i.e. if no NAs will equal 0
+  as.data.frame() %>% #convert back to df
+  filter(. < 1128) #>1128 NAs = the year is missing as 1128 rows per year
+```
+Based on this only Yield_Kg has the data required for analysis in 2016.
+
+### 2017
+```{r}
+phenotype %>%
+  filter(Year == 2017) %>% #filter by year
+  select(all_of(traits_of_interest)) %>% #select the traits of interest
+  sapply(., \(x) is.na(x)) %>% #logical vector checking if entries are NA
+  as.data.frame() %>% #convert to df
+  colSums() %>% #calculate colsums i.e. if no NAs will equal 0
+  as.data.frame() %>% #convert back to df
+  filter(. < 1128) #>1128 NAs = the year is missing as 1128 rows per year
+```
+
+Based on this all traits of interest are measured in 2017.
+
+### 2018
+
+```{r}
+phenotype %>%
+  filter(Year == 2018) %>% #filter by year
+  select(all_of(traits_of_interest)) %>% #select the traits of interest
+  sapply(., \(x) is.na(x)) %>% #logical vector checking if entries are NA
+  as.data.frame() %>% #convert to df
+  colSums() %>% #calculate colsums i.e. if no NAs will equal 0
+  as.data.frame() %>% #convert back to df
+  filter(. < 1128) #>1128 NAs = the year is missing as 1128 rows per year
+```
+
+Based on this all traits of interest are measured in 2018.
+
+Overall yield is measured across all three years, the other traits of interest
+are only measured in 2017 and 2018.
+
+We will create a subset of traits in 2017 and 2018 for subsequent analysis.
+
+```{r}
+phenotype_17_18 <- phenotype %>%
+  filter(Year == 2017 | Year == 2018)
+```
+
+# Replace NA values
+
+As demonstrated for the above, even when the traits are measured for a given
+year there are some values missing. Thus, we now need to check for and 
+replace NAs for each of the different traits.
+
+### Check for and replace NAs for yield_kg
+
+Unlike the other traits, yield is measured across all three years so we 
+will just use the full dataset.
+
+```{r}
+phenotype %>%
+  filter(is.na(Yield_Kg)) %>% #select NA values
+  select(Genotype_ID) %>% #display genotype ID col
+  pull() #show as vector
+```
+
+Based on this genotypes/varieties 93 and 115 are NA. We can see this in more
+detail below...
+
+```{r}
+phenotype %>%
+  rownames_to_column() %>%
+  filter(Genotype_ID == 93 
+         | Genotype_ID == 115) %>% #filter to genotypes with NA for yield
+  select(rowname,
+         System,
+         Genotype_ID,
+         Variety.name, 
+         Replicate, 
+         Year, 
+         Yield_Kg) #select info cols + yield trait
+```
+
+Looking at this the NAs for are in rows 1114 (ID 93) and 1378 (ID 115). 
+They are also both for Organic, Replicate 2 in 2018. Thus to account for this 
+missing data we will just replace the NAs with Organic, Replicate 1 in 2018 for 
+each variety.
+
+```{r}
+#select replacement data for genotype 93
+yield_ID93 <- phenotype %>%
+  filter(Genotype_ID == 93 
+         & System == "Org" 
+         & Replicate == 1
+         & Year == 2018) %>%
+  select(Yield_Kg) %>%
+  pull()
+
+#replace NA for genotype 93
+phenotype$Yield_Kg[1114] <- yield_ID93
+
+#select replacement data for genotype 115
+yield_ID115 <- phenotype %>%
+  filter(Genotype_ID == 115 
+         & System == "Org" 
+         & Replicate == 1
+         & Year == 2018) %>%
+  select(Yield_Kg) %>%
+  pull()
+
+#replace NA for genotype 115
+phenotype$Yield_Kg[1378] <- yield_ID115
+```
+
+### Check for and replace NAs for height, area, volume traits.
+
+Only measured in 2017 and 18 so use the subset of data. Done all together as 
+same number of NAs for each trait = likely the same values missing.
+
+```{r}
+#Max_Max_height_m
+phenotype_17_18 %>%
+  filter(is.na(Max_Max_height_m)) %>% #select NA values
+  select(Genotype_ID) %>% #display genotype ID col
+  rename(Max_Max_height_m_NAs = Genotype_ID) #rename col to make output clear
+
+#Max_Ave_height_m
+phenotype_17_18 %>%
+  filter(is.na(Max_Ave_height_m)) %>% #select NA values
+  select(Genotype_ID) %>% #display genotype ID col
+  rename(Max_Ave_height_m_NAs = Genotype_ID) #rename col to make output clear
+
+#Max_area_plant_m2
+phenotype_17_18 %>%
+  filter(is.na(Max_area_plant_m2)) %>% #select NA values
+  select(Genotype_ID) %>% #display genotype ID col
+  rename(Max_area_plant_m2_NAs = Genotype_ID) #rename col to make output clear
+
+#Max_volume_plant_m3
+phenotype_17_18 %>%
+  filter(is.na(Max_volume_plant_m3)) %>% #select NA values
+  select(Genotype_ID) %>% #display genotype ID col
+  rename(Max_volume_plant_m3_NAs = Genotype_ID) #rename col to make output clear
+```
+
+In the case of all these traits genotype 93 has one NA, 148 has two. 
+We can see this in more detail below...
+
+```{r}
+phenotype_17_18 %>%
+  rownames_to_column() %>%
+  filter(Genotype_ID == 93 
+         | Genotype_ID == 148) %>% #filter to genotypes with NA 
+  filter(is.na(Max_Max_height_m)) %>% #filter to just show NAs
+  select(rowname,
+         System,
+         Genotype_ID,
+         Variety.name, 
+         Replicate, 
+         Year, 
+         Max_Max_height_m,
+         Max_Ave_height_m,
+         Max_area_plant_m2,
+         Max_volume_plant_m3) #select info cols + traits
+```
+
+Thus, for all these traits...
+
+The NA for ID 93 is in row 742 for Organic, Replicate 2 in 2018. 
+We can just replace these NA with Organic, Replicate 1 in 2018 for this variety.
+
+```{r}
+#Max_Max_height_m
+
+#select replacement data for genotype 93
+Max_Max_height_m_ID93 <- phenotype_17_18 %>%
+  filter(Genotype_ID == 93 
+         & System == "Org" 
+         & Replicate == 1
+         & Year == 2018) %>%
+  select(Max_Max_height_m) %>%
+  pull()
+
+#replace NA for genotype 93
+phenotype_17_18$Max_Max_height_m[742] <- Max_Max_height_m_ID93
+
+#Max_Ave_height_m
+
+#select replacement data for genotype 93
+Max_Ave_height_m_ID93 <- phenotype_17_18 %>%
+  filter(Genotype_ID == 93 
+         & System == "Org" 
+         & Replicate == 1
+         & Year == 2018) %>%
+  select(Max_Ave_height_m) %>%
+  pull()
+
+#replace NA for genotype 93
+phenotype_17_18$Max_Ave_height_m[742] <- Max_Ave_height_m_ID93
+
+#Max_area_plant_m2
+
+#select replacement data for genotype 93
+Max_area_plant_m2_ID93 <- phenotype_17_18 %>%
+  filter(Genotype_ID == 93 
+         & System == "Org" 
+         & Replicate == 1
+         & Year == 2018) %>%
+  select(Max_area_plant_m2) %>%
+  pull()
+
+#replace NA for genotype 93
+phenotype_17_18$Max_area_plant_m2[742] <- Max_area_plant_m2_ID93
+
+#Max_volume_plant_m3
+
+#select replacement data for genotype 93
+Max_volume_plant_m3_ID93 <- phenotype_17_18 %>%
+  filter(Genotype_ID == 93 
+         & System == "Org" 
+         & Replicate == 1
+         & Year == 2018) %>%
+  select(Max_volume_plant_m3) %>%
+  pull()
+
+#replace NA for genotype 93
+phenotype_17_18$Max_volume_plant_m3[742] <- Max_volume_plant_m3_ID93
+```
+
+The NAs for ID 148 are both in Organic 2017 (rows 1177 and 1178). Since there is 
+no replicate will replace both these NAs with mean for Organic 2018.
+
+```{r}
+#Max_Max_height_m
+
+#select replacement data for ID 148
+Max_Max_height_m_ID148 <- phenotype_17_18 %>%
+  filter(Genotype_ID == 148 
+         & System == "Org" 
+         & Year == 2018) %>%
+  select(Max_Max_height_m) %>%
+  colMeans()
+
+#replace NA for genotype 148
+phenotype_17_18$Max_Max_height_m[1177] <- Max_Max_height_m_ID148
+phenotype_17_18$Max_Max_height_m[1178] <- Max_Max_height_m_ID148
+
+#Max_Ave_height_m
+
+#select replacement data for ID 148
+Max_Ave_height_m_ID148 <- phenotype_17_18 %>%
+  filter(Genotype_ID == 148 
+         & System == "Org" 
+         & Year == 2018) %>%
+  select(Max_Ave_height_m) %>%
+  colMeans()
+
+#replace NA for genotype 148
+phenotype_17_18$Max_Ave_height_m[1177] <- Max_Ave_height_m_ID148
+phenotype_17_18$Max_Ave_height_m[1178] <- Max_Ave_height_m_ID148
+
+#Max_area_plant_m2
+
+#select replacement data for ID 148
+Max_area_plant_m2_ID148 <- phenotype_17_18 %>%
+  filter(Genotype_ID == 148 
+         & System == "Org" 
+         & Year == 2018) %>%
+  select(Max_area_plant_m2) %>%
+  colMeans()
+
+#replace NA for genotype 148
+phenotype_17_18$Max_area_plant_m2[1177] <- Max_area_plant_m2_ID148
+phenotype_17_18$Max_area_plant_m2[1178] <- Max_area_plant_m2_ID148
+
+#Max_volume_plant_m3
+
+#select replacement data for ID 148
+Max_volume_plant_m3_ID148 <- phenotype_17_18 %>%
+  filter(Genotype_ID == 148 
+         & System == "Org" 
+         & Year == 2018) %>%
+  select(Max_volume_plant_m3) %>%
+  colMeans()
+
+#replace NA for genotype 148
+phenotype_17_18$Max_volume_plant_m3[1177] <- Max_volume_plant_m3_ID148
+phenotype_17_18$Max_volume_plant_m3[1178] <- Max_volume_plant_m3_ID148
+```
+
+# BLUEs
+
+Having selected the traits of interest the next step is to calculate
+Best Linear Unbiased estimates for each trait.
+
+This is done by setting up a mixed effect model where...
+
+- Fixed effects = Trait of interest, Genotype (i.e. Trait ~ Genotype)
+- Random effects = Cultivation system (System) and Year
+
+Note that in order for the model to work in lme4 (the package used modelling) 
+we must ensure System, Year and Genotype_ID are set to factors. 
+
+For full data-set (when doing yield_kg trait)
+
+```{r}
+phenotype$Genotype_ID <- as.factor(phenotype$Genotype_ID)
+phenotype$System <- as.factor(phenotype$System)
+phenotype$Year <- as.factor(phenotype$Year)
+```
+
+For 2017/18 data-set (when doing other traits)
+
+```{r}
+phenotype_17_18$Genotype_ID <- as.factor(phenotype_17_18$Genotype_ID)
+phenotype_17_18$System <- as.factor(phenotype_17_18$System)
+phenotype_17_18$Year <- as.factor(phenotype_17_18$Year)
+```
+
+# Yield (Kg)
+
+Yield is measured across all three years so we can just use the full dataset.
+
+### Plot top 5 median (across the 3 years) Yield_Kg varieties for each system
+
+```{r}
+top_yield <- phenotype %>%
+  group_by(System, Variety.name) %>%
+  summarise(median_yield = median(Yield_Kg, na.rm = T)) %>% #median yield summary 
+  arrange(System, desc(median_yield)) %>% #arrange from highest-lowest median split by system
+  group_by(System)%>%
+  slice_head(n = 5) #take top 5 for each system
+  
+df_top_yield <- phenotype %>%
+  semi_join(top_yield, by = c("System", "Variety.name"))
+
+p1 <- df_top_yield  %>%
+  ggplot(mapping = aes(x = Variety.name, y = Yield_Kg, fill = System))+
+  geom_boxplot()+
+  geom_jitter(position = position_dodge(0.75),
+              alpha = 0.5, size = 10)+ #show points stacked vertically
+  ylab("Yield (Kg)")+
+  xlab(NULL)+
+  scale_y_continuous(limits = c(0, 12), breaks = seq(0,12,2))+ #y axis breaks
+  scale_fill_manual(values = c("#C1EAF5", "#DBF3D0"))+ #own colours for scale
+  theme(
+    panel.grid.major = element_blank(), #remove major grid lines
+    panel.grid.minor = element_blank(), #remove minor grid lines
+    axis.line = element_line(), #add lines to axes
+    axis.text.x = 
+      element_text(angle = 90, vjust = 0.5, hjust=1, size = 40), #vertical x axis text
+    axis.text.y = element_text(size = 40), #larger y axis text
+    axis.title.y = element_text(size = 40)) #larger y axis title
+
+ggsave(filename = "BLUEs_PIC_output/top_median_yield.pdf", 
+       plot = p1, device = pdf, width = 33, height = 20) 
+```
+
+### Plot bottom 5 median (across the 3 years) Yield_Kg varieties for each system
+
+```{r}
+bottom_yield <- phenotype %>%
+  group_by(System, Variety.name) %>%
+  summarise(median_yield = median(Yield_Kg, na.rm = T)) %>% #median yield summary 
+  arrange(System, median_yield) %>% #arrange from highest-lowest median split by system
+  group_by(System)%>%
+  slice_head(n = 5) #take bottom 5 for each system
+
+df_bottom_yield <- phenotype %>%
+  semi_join(bottom_yield, by = c("System", "Variety.name"))
+
+p1 <- df_bottom_yield  %>%
+  ggplot(mapping = aes(x = Variety.name, y = Yield_Kg, fill = System))+
+  geom_boxplot()+
+  geom_jitter(position = position_dodge(0.75),
+              alpha = 0.5, size = 10)+ #show points stacked vertically
+  ylab("Yield (Kg)")+
+  xlab(NULL)+
+  scale_y_continuous(limits = c(0, 12), breaks = seq(0,12,2))+ #y axis breaks
+  scale_fill_manual(values = c("#C1EAF5", "#DBF3D0"))+ #own colours for scale
+  theme(
+    panel.grid.major = element_blank(), #remove major grid lines
+    panel.grid.minor = element_blank(), #remove minor grid lines
+    axis.line = element_line(), #add lines to axes
+    axis.text.x = 
+      element_text(angle = 90, vjust = 0.5, hjust=1, size = 40), #vertical x axis text
+    axis.text.y = element_text(size = 40), #larger y axis text
+    axis.title.y = element_text(size = 40)) #larger y axis title
+
+ggsave(filename = "BLUEs_PIC_output/bottom_median_yield.pdf", 
+       plot = p1, device = pdf, width = 33, height = 20) 
+```
+
+### Calculate BLUEs
+
+In our GWAS model we are interested in how a given cultivar/genotype predicts
+a given trait e.g., yield_kg. This can be represented as below.
+
+```{r}
+#fixed effect model Yield_Kg ~ Genotype_ID
+fixed_effect_model <- lm(Yield_Kg ~ Genotype_ID, 
+                           data = phenotype)
+
+#view effect of first 10 cultivars on yield
+head(summary(fixed_effect_model)$coefficients,10) 
+```
+
+This shows at least some cultivars/genotypes have a significant differences in 
+yield.
+
+However, both System (organic vs control) and Year (2016-2018) may need to be
+accounted for in the model, to check this we can do the following.
+
+First we can compare the fixed model with a model treating system as random.
+
+```{r, warning=FALSE}
+#note for the models containing random effects,
+#REML = FALSE is better for comparing models
+
+#model with System as random effect
+random_system_model <- lmer(Yield_Kg ~ Genotype_ID + (1|System),
+                            data = phenotype,
+                            REML = FALSE)
+
+#perform log likelihood ratio test
+lmtest::lrtest(fixed_effect_model, random_system_model)
+
+#results = significant so system is an important random effect
+
+#check AIC and BIC scores
+AIC(fixed_effect_model, random_system_model)
+BIC(fixed_effect_model, random_system_model)
+
+#both AIC and BIC are lower suggesting including system as a random effect
+#improves the model
+
+#check variance of random effect
+lme4::VarCorr(random_system_model)
+
+#variance relatively low so may not have a large impact
+```
+Overall, it looks as though System should be included as a random effect.
+
+Now we can compare the fixed model with a model treating year as random.
+
+```{r, warning=FALSE}
+#note for the models containing random effects,
+#REML = FALSE is better for comparing models
+
+#model with year as random effect
+random_year_model <- lmer(Yield_Kg ~ Genotype_ID + (1|Year),
+                            data = phenotype,
+                            REML = FALSE)
+
+#perform log likelihood ratio test
+lmtest::lrtest(fixed_effect_model, random_year_model)
+
+#results = significant so year is an important random effect
+
+#check AIC and BIC scores
+AIC(fixed_effect_model, random_year_model)
+BIC(fixed_effect_model, random_year_model)
+
+#both AIC and BIC are lower suggesting including year as a random effect
+#improves the model
+
+#check variance of random effect
+lme4::VarCorr(random_year_model)
+
+#variance relatively low so may not have a large impact
+```
+Overall, it looks as though year should be included as a random effect.
+
+To double check will compare each of the previous random effects models to one
+including both year and system as random effects.
+
+```{r}
+#note for the models containing random effects,
+#REML = FALSE is better for comparing models
+
+#model with year and system as random effect
+random_year_system_model <- lmer(Yield_Kg ~ Genotype_ID + (1|Year) + (1|System),
+                            data = phenotype,
+                            REML = FALSE)
+
+### Compare random_year_system_model and random_year_model ####
+
+#perform log likelihood ratio test
+lmtest::lrtest(random_year_model, random_year_system_model)
+
+#results = significant so does change model
+
+#check AIC and BIC scores
+AIC(random_year_model, random_year_system_model)
+BIC(random_year_model, random_year_system_model)
+
+#both AIC and BIC are lower suggesting including year AND system as random effects
+#improves the model
+
+#check variance of random effect
+lme4::VarCorr(random_year_system_model)
+
+#variances relatively low so may not have a large impact
+
+##############
+
+### Compare random_year_system_model and random_system_model ####
+
+#perform log likelihood ratio test
+lmtest::lrtest(random_system_model, random_year_system_model)
+
+#results = significant so does change model
+
+#check AIC and BIC scores
+AIC(random_system_model, random_year_system_model)
+BIC(random_system_model, random_year_system_model)
+
+#both AIC and BIC are lower suggesting including year AND system as random effects
+#improves the model
+```
+
+Overall I will include both System and Year as random effects in the final 
+models for yield (and all other traits for consistency).
+
+```{r}
+#note here have used REML = TRUE which gives less biased variance estimates
+#for random effects which is better for calculating BLUEs
+
+yield_lmer <- lmer(formula = Yield_Kg ~ Genotype_ID + (1|System) + (1|Year),
+                   data = phenotype,
+                   REML = TRUE)
+```
+
+```{r}
+#note fixef(yield_lmer) is essentially the same as yield_lmer@beta it just gives
+#a named vector instead (fixef(yield_lmer) = ID/name + fixed effect estimate, 
+#yield_lmer@beta = fixed effect estimate).
+
+fe <- fixef(yield_lmer) #extract fixed effects coefficients/estimates
+
+BLUEs <- fe+c(0,rep(fe[1],length(fe)-1)) #add intercept to all subsequent values
+
+yield_BLUEs <- 
+  BLUEs %>% #BLUEs data as vector
+  as_tibble() %>% #convert to tibble
+  mutate(ID = unique(phenotype$Variety.name)) %>% #add variety name col
+  relocate(ID, before = value) %>% #move ID col to front (for GWAS_poly)
+  rename(yield_kg = before) #rename col to yield_kg
+```
+
+### QQ plots
+
+```{r, message=FALSE}
+pdf(file = "BLUEs_PIC_output/yield_qq.pdf")
+
+residuals(yield_lmer) %>%
+  as.tibble %>%
+  ggplot(mapping = aes(x = value))+
+  geom_histogram(binwidth = 0.4)
+
+qqnorm(residuals(yield_lmer))
+
+qqline(residuals(yield_lmer))
+
+plot(yield_lmer)
+
+dev.off()
+```
+
+# Max_Max_height_m
+
+### Plot top 5 median (for 17/18) Max_Max_height_m varieties for each system
+
+```{r}
+top_Max_Max_height_m <- phenotype_17_18 %>%
+  group_by(System, Variety.name) %>%
+  summarise(median_Max_Max_height_m = median(Max_Max_height_m, na.rm = T)) %>% #median Max_Max_height_m summary 
+  arrange(System, desc(median_Max_Max_height_m)) %>% #arrange from highest-lowest median split by system
+  group_by(System)%>%
+  slice_head(n = 5) #take top 5 for each system
+
+df_top_Max_Max_height_m <- phenotype_17_18 %>%
+  semi_join(top_Max_Max_height_m, by = c("System", "Variety.name"))
+
+p1 <- df_top_Max_Max_height_m  %>%
+  ggplot(mapping = aes(x = Variety.name, y = Max_Max_height_m, fill = System))+
+  geom_boxplot()+
+  geom_jitter(position = position_dodge(0.75),
+              alpha = 0.5, size = 10)+ #show points stacked vertically
+  ylab("Max height (m)")+
+  xlab(NULL)+
+  scale_y_continuous(limits = c(0, 1.2), breaks = seq(0,1.2,0.4))+ #y axis breaks
+  scale_fill_manual(values = c("#C1EAF5", "#DBF3D0"))+ #own colours for scale
+  theme(
+    panel.grid.major = element_blank(), #remove major grid lines
+    panel.grid.minor = element_blank(), #remove minor grid lines
+    axis.line = element_line(), #add lines to axes
+    axis.text.x = 
+      element_text(angle = 90, vjust = 0.5, hjust=1, size = 40), #vertical x axis text
+    axis.text.y = element_text(size = 40), #larger y axis text
+    axis.title.y = element_text(size = 40)) #larger y axis title
+
+ggsave(filename = "BLUEs_PIC_output/top_median_Max_Max_height_m.pdf", 
+       plot = p1, device = pdf, width = 33, height = 20) 
+```
+
+### Plot bottom 5 median (for 17/18) Max_Max_height_m varieties for each system
+
+```{r}
+bottom_Max_Max_height_m <- phenotype_17_18 %>%
+  group_by(System, Variety.name) %>%
+  summarise(median_Max_Max_height_m = median(Max_Max_height_m, na.rm = T)) %>% #median yield summary 
+  arrange(System, median_Max_Max_height_m) %>% #arrange from highest-lowest median split by system
+  group_by(System)%>%
+  slice_head(n = 5) #take bottom 5 for each system
+
+df_bottom_Max_Max_height_m <- phenotype_17_18 %>%
+  semi_join(bottom_Max_Max_height_m, by = c("System", "Variety.name"))
+
+p1 <- df_bottom_Max_Max_height_m %>%
+  ggplot(mapping = aes(x = Variety.name, y = Max_Max_height_m, fill = System))+
+  geom_boxplot()+
+  geom_jitter(position = position_dodge(0.75),
+              alpha = 0.5, size = 10)+ #show points stacked vertically
+  ylab("Max height (m)")+
+  xlab(NULL)+
+  scale_y_continuous(limits = c(0, 1.2), breaks = seq(0,1.2,0.4))+ #y axis breaks
+  scale_fill_manual(values = c("#C1EAF5", "#DBF3D0"))+ #own colours for scale
+  theme(
+    panel.grid.major = element_blank(), #remove major grid lines
+    panel.grid.minor = element_blank(), #remove minor grid lines
+    axis.line = element_line(), #add lines to axes
+    axis.text.x = 
+      element_text(angle = 90, vjust = 0.5, hjust=1, size = 40), #vertical x axis text
+    axis.text.y = element_text(size = 40), #larger y axis text
+    axis.title.y = element_text(size = 40)) #larger y axis title
+
+ggsave(filename = "BLUEs_PIC_output/bottom_median_Max_Max_height_m.pdf", 
+       plot = p1, device = pdf, width = 33, height = 20) 
+```
+
+### Calculate BLUEs
+
+```{r}
+Max_Max_height_m_lmer <- lmer(formula = Max_Max_height_m ~ Genotype_ID 
+                         + (1|System) + (1|Year),
+                         data = phenotype_17_18,
+                         REML = TRUE)
+```
+
+```{r}
+fe <- fixef(Max_Max_height_m_lmer) #extract fixed effects estimates
+
+BLUEs <- fe+c(0,rep(fe[1],length(fe)-1)) #add intercept to all subsequent values
+
+Max_Max_height_m_BLUEs <- 
+  BLUEs %>% #BLUEs data as vector
+  as_tibble() %>% #convert to tibble
+  mutate(ID = unique(phenotype$Variety.name)) %>% #add variety name col
+  relocate(ID, before = value) %>% #move ID col to front (for GWAS_poly)
+  rename(Max_Max_height_m = before) #rename col to Max_Max_height_m
+```
+
+### QQ plots
+
+```{r, message=FALSE}
+pdf(file = "BLUEs_PIC_output/Max_Max_height_m_qq.pdf")
+
+qqnorm(residuals(Max_Max_height_m_lmer))
+
+qqline(residuals(Max_Max_height_m_lmer))
+
+plot(Max_Max_height_m_lmer)
+
+dev.off()
+```
+
+# Max_Ave_height_m
+
+### Plot top 5 median (for 17/18) Max_Ave_height_m varieties for each system
+
+```{r}
+top_Max_Ave_height_m <- phenotype_17_18 %>%
+  group_by(System, Variety.name) %>%
+  summarise(median_Max_Ave_height_m = median(Max_Ave_height_m, na.rm = T)) %>% #median Max_Ave_height_m summary 
+  arrange(System, desc(median_Max_Ave_height_m)) %>% #arrange from highest-lowest median split by system
+  group_by(System)%>%
+  slice_head(n = 5) #take top 5 for each system
+
+df_top_Max_Ave_height_m <- phenotype_17_18 %>%
+  semi_join(top_Max_Ave_height_m, by = c("System", "Variety.name"))
+
+p1 <- df_top_Max_Ave_height_m  %>%
+  ggplot(mapping = aes(x = Variety.name, y = Max_Ave_height_m, fill = System))+
+  geom_boxplot()+
+  geom_jitter(position = position_dodge(0.75),
+              alpha = 0.5, size = 10)+ #show points stacked vertically
+  ylab("Mean height (m)")+
+  xlab(NULL)+
+  scale_y_continuous(limits = c(0, 0.8), breaks = seq(0,0.8,0.2))+ #y axis breaks
+  scale_fill_manual(values = c("#C1EAF5", "#DBF3D0"))+ #own colours for scale
+  theme(
+    panel.grid.major = element_blank(), #remove major grid lines
+    panel.grid.minor = element_blank(), #remove minor grid lines
+    axis.line = element_line(), #add lines to axes
+    axis.text.x = 
+      element_text(angle = 90, vjust = 0.5, hjust=1, size = 40), #vertical x axis text
+    axis.text.y = element_text(size = 40), #larger y axis text
+    axis.title.y = element_text(size = 40)) #larger y axis title
+
+ggsave(filename = "BLUEs_PIC_output/top_median_Max_Ave_height_m.pdf", 
+       plot = p1, device = pdf, width = 33, height = 20) 
+```
+
+### Plot bottom 5 median (for 17/18) Max_Ave_height_m varieties for each system
+
+```{r}
+bottom_Max_Ave_height_m <- phenotype_17_18 %>%
+  group_by(System, Variety.name) %>%
+  summarise(median_Max_Ave_height_m = median(Max_Ave_height_m, na.rm = T)) %>% #median yield summary 
+  arrange(System, median_Max_Ave_height_m) %>% #arrange from highest-lowest median split by system
+  group_by(System)%>%
+  slice_head(n = 5) #take bottom 5 for each system
+
+df_bottom_Max_Ave_height_m <- phenotype_17_18 %>%
+  semi_join(bottom_Max_Ave_height_m, by = c("System", "Variety.name"))
+
+p1 <- df_bottom_Max_Ave_height_m %>%
+  ggplot(mapping = aes(x = Variety.name, y = Max_Ave_height_m, fill = System))+
+  geom_boxplot()+
+  geom_jitter(position = position_dodge(0.75),
+              alpha = 0.5, size = 10)+ #show points stacked vertically
+  ylab("Mean height (m)")+
+  xlab(NULL)+
+  scale_y_continuous(limits = c(0, 0.8), breaks = seq(0,0.8,0.2))+ #y axis breaks
+  scale_fill_manual(values = c("#C1EAF5", "#DBF3D0"))+ #own colours for scale
+  theme(
+    panel.grid.major = element_blank(), #remove major grid lines
+    panel.grid.minor = element_blank(), #remove minor grid lines
+    axis.line = element_line(), #add lines to axes
+    axis.text.x = 
+      element_text(angle = 90, vjust = 0.5, hjust=1, size = 40), #vertical x axis text
+    axis.text.y = element_text(size = 40), #larger y axis text
+    axis.title.y = element_text(size = 40)) #larger y axis title
+
+ggsave(filename = "BLUEs_PIC_output/bottom_median_Max_Ave_height_m.pdf", 
+       plot = p1, device = pdf, width = 33, height = 20) 
+```
+
+### Calculate BLUEs
+
+```{r}
+Max_Ave_height_m_lmer <- lmer(formula = Max_Ave_height_m ~ Genotype_ID 
+                              + (1|System) + (1|Year),
+                              data = phenotype_17_18,
+                              REML = TRUE)
+```
+
+```{r}
+fe <- fixef(Max_Ave_height_m_lmer) #extract fixed effects estimates
+
+BLUEs <- fe+c(0,rep(fe[1],length(fe)-1)) #add intercept to all subsequent values
+
+Max_Ave_height_m_BLUEs <- 
+  BLUEs %>% #BLUEs data as vector
+  as_tibble() %>% #convert to tibble
+  mutate(ID = unique(phenotype$Variety.name)) %>% #add variety name col
+  relocate(ID, before = value) %>% #move ID col to front (for GWAS_poly)
+  rename(Max_Ave_height_m = before) #rename col to Max_Ave_height_m
+```
+
+### QQ plots
+
+```{r, message=FALSE}
+pdf(file = "BLUEs_PIC_output/Max_Ave_height_m_qq.pdf")
+
+qqnorm(residuals(Max_Ave_height_m_lmer))
+
+qqline(residuals(Max_Ave_height_m_lmer))
+
+plot(Max_Ave_height_m_lmer)
+
+dev.off()
+```
+
+# Max_area_plant_m2
+
+### Plot top 5 median (for 17/18) Max_area_plant_m2 varieties for each system
+
+```{r}
+top_Max_area_plant_m2 <- phenotype_17_18 %>%
+  group_by(System, Variety.name) %>%
+  summarise(median_Max_area_plant_m2 = median(Max_area_plant_m2, na.rm = T)) %>% #median Max_area_plant_m2 summary 
+  arrange(System, desc(median_Max_area_plant_m2)) %>% #arrange from highest-lowest median split by system
+  group_by(System)%>%
+  slice_head(n = 5) #take top 5 for each system
+
+df_top_Max_area_plant_m2 <- phenotype_17_18 %>%
+  semi_join(top_Max_area_plant_m2, by = c("System", "Variety.name"))
+
+p1 <- df_top_Max_area_plant_m2  %>%
+  ggplot(mapping = aes(x = Variety.name, y = Max_area_plant_m2, fill = System))+
+  geom_boxplot()+
+  geom_jitter(position = position_dodge(0.75),
+              alpha = 0.5, size = 10)+ #show points stacked vertically
+  ylab(expression("Max area plant (m"^2*")"))+
+  xlab(NULL)+
+  scale_y_continuous(limits = c(0, 1.2), breaks = seq(0,1.2,0.4))+ #y axis breaks
+  scale_fill_manual(values = c("#C1EAF5", "#DBF3D0"))+ #own colours for scale
+  theme(
+    panel.grid.major = element_blank(), #remove major grid lines
+    panel.grid.minor = element_blank(), #remove minor grid lines
+    axis.line = element_line(), #add lines to axes
+    axis.text.x = 
+      element_text(angle = 90, vjust = 0.5, hjust=1, size = 40), #vertical x axis text
+    axis.text.y = element_text(size = 40), #larger y axis text
+    axis.title.y = element_text(size = 40)) #larger y axis title
+
+ggsave(filename = "BLUEs_PIC_output/top_median_Max_area_plant_m2.pdf", 
+       plot = p1, device = pdf, width = 33, height = 20) 
+```
+
+### Plot bottom 5 median (for 17/18) Max_area_plant_m2 varieties for each system
+
+```{r}
+bottom_Max_area_plant_m2 <- phenotype_17_18 %>%
+  group_by(System, Variety.name) %>%
+  summarise(median_Max_area_plant_m2 = median(Max_area_plant_m2, na.rm = T)) %>% #median yield summary 
+  arrange(System, median_Max_area_plant_m2) %>% #arrange from highest-lowest median split by system
+  group_by(System)%>%
+  slice_head(n = 5) #take bottom 5 for each system
+
+df_bottom_Max_area_plant_m2 <- phenotype_17_18 %>%
+  semi_join(bottom_Max_area_plant_m2, by = c("System", "Variety.name"))
+
+p1 <- df_bottom_Max_area_plant_m2 %>%
+  ggplot(mapping = aes(x = Variety.name, y = Max_area_plant_m2, fill = System))+
+  geom_boxplot()+
+  geom_jitter(position = position_dodge(0.75),
+              alpha = 0.5, size = 10)+ #show points stacked vertically
+  ylab(expression("Max area plant (m"^2*")"))+
+  xlab(NULL)+
+  scale_y_continuous(limits = c(0, 1.2), breaks = seq(0,1.2,0.4))+ #y axis breaks
+  scale_fill_manual(values = c("#C1EAF5", "#DBF3D0"))+ #own colours for scale
+  theme(
+    panel.grid.major = element_blank(), #remove major grid lines
+    panel.grid.minor = element_blank(), #remove minor grid lines
+    axis.line = element_line(), #add lines to axes
+    axis.text.x = 
+      element_text(angle = 90, vjust = 0.5, hjust=1, size = 40), #vertical x axis text
+    axis.text.y = element_text(size = 40), #larger y axis text
+    axis.title.y = element_text(size = 40)) #larger y axis title
+
+ggsave(filename = "BLUEs_PIC_output/bottom_median_Max_area_plant_m2.pdf", 
+       plot = p1, device = pdf, width = 33, height = 20) 
+```
+### Calculate BLUEs
+
+```{r}
+Max_area_plant_m2_lmer <- lmer(formula = Max_area_plant_m2 ~ Genotype_ID 
+                              + (1|System) + (1|Year),
+                              data = phenotype_17_18,
+                              REML = TRUE)
+```
+
+```{r}
+fe <- fixef(Max_area_plant_m2_lmer) #extract fixed effects estimates
+
+BLUEs <- fe+c(0,rep(fe[1],length(fe)-1)) #add intercept to all subsequent values
+
+Max_area_plant_m2_BLUEs <- 
+  BLUEs %>% #BLUEs data as vector
+  as_tibble() %>% #convert to tibble
+  mutate(ID = unique(phenotype$Variety.name)) %>% #add variety name col
+  relocate(ID, before = value) %>% #move ID col to front (for GWAS_poly)
+  rename(Max_area_plant_m2 = before) #rename col to Max_area_plant_m2
+```
+
+### QQ plots
+
+```{r, message=FALSE}
+pdf(file = "BLUEs_PIC_output/Max_area_plant_m2_qq.pdf")
+
+qqnorm(residuals(Max_area_plant_m2_lmer))
+
+qqline(residuals(Max_area_plant_m2_lmer))
+
+plot(Max_area_plant_m2_lmer)
+
+dev.off()
+```
+
+# Max_volume_plant_m3
+
+### Plot top 5 median (for 17/18) Max_volume_plant_m3 varieties for each system
+
+```{r}
+top_Max_volume_plant_m3 <- phenotype_17_18 %>%
+  group_by(System, Variety.name) %>%
+  summarise(median_Max_volume_plant_m3 = median(Max_volume_plant_m3, na.rm = T)) %>% #median Max_volume_plant_m3 summary 
+  arrange(System, desc(median_Max_volume_plant_m3)) %>% #arrange from highest-lowest median split by system
+  group_by(System)%>%
+  slice_head(n = 5) #take top 5 for each system
+
+df_top_Max_volume_plant_m3 <- phenotype_17_18 %>%
+  semi_join(top_Max_volume_plant_m3, by = c("System", "Variety.name"))
+
+p1 <- df_top_Max_volume_plant_m3  %>%
+  ggplot(mapping = aes(x = Variety.name, y = Max_volume_plant_m3, fill = System))+
+  geom_boxplot()+
+  geom_jitter(position = position_dodge(0.75),
+              alpha = 0.5, size = 10)+ #show points stacked vertically
+  ylab(expression("Max volume plant (m"^3*")"))+
+  xlab(NULL)+
+  scale_y_continuous(limits = c(0, 0.4), breaks = seq(0,0.4,0.2))+ #y axis breaks
+  scale_fill_manual(values = c("#C1EAF5", "#DBF3D0"))+ #own colours for scale
+  theme(
+    panel.grid.major = element_blank(), #remove major grid lines
+    panel.grid.minor = element_blank(), #remove minor grid lines
+    axis.line = element_line(), #add lines to axes
+    axis.text.x = 
+      element_text(angle = 90, vjust = 0.5, hjust=1, size = 40), #vertical x axis text
+    axis.text.y = element_text(size = 40), #larger y axis text
+    axis.title.y = element_text(size = 40)) #larger y axis title
+
+ggsave(filename = "BLUEs_PIC_output/top_median_Max_volume_plant_m3.pdf", 
+       plot = p1, device = pdf, width = 33, height = 20) 
+```
+
+### Plot bottom 5 median (for 17/18) Max_volume_plant_m3 varieties for each system
+
+```{r}
+bottom_Max_volume_plant_m3 <- phenotype_17_18 %>%
+  group_by(System, Variety.name) %>%
+  summarise(median_Max_volume_plant_m3 = median(Max_volume_plant_m3, na.rm = T)) %>% #median yield summary 
+  arrange(System, median_Max_volume_plant_m3) %>% #arrange from highest-lowest median split by system
+  group_by(System)%>%
+  slice_head(n = 5) #take bottom 5 for each system
+
+df_bottom_Max_volume_plant_m3 <- phenotype_17_18 %>%
+  semi_join(bottom_Max_volume_plant_m3, by = c("System", "Variety.name"))
+
+p1 <- df_bottom_Max_volume_plant_m3 %>%
+  ggplot(mapping = aes(x = Variety.name, y = Max_volume_plant_m3, fill = System))+
+  geom_boxplot()+
+  geom_jitter(position = position_dodge(0.75),
+              alpha = 0.5, size = 10)+ #show points stacked vertically
+  ylab(expression("Max volume plant (m"^3*")"))+
+  xlab(NULL)+
+  scale_y_continuous(limits = c(0, 0.4), breaks = seq(0,0.4,0.2))+ #y axis breaks
+  scale_fill_manual(values = c("#C1EAF5", "#DBF3D0"))+ #own colours for scale
+  theme(
+    panel.grid.major = element_blank(), #remove major grid lines
+    panel.grid.minor = element_blank(), #remove minor grid lines
+    axis.line = element_line(), #add lines to axes
+    axis.text.x = 
+      element_text(angle = 90, vjust = 0.5, hjust=1, size = 40), #vertical x axis text
+    axis.text.y = element_text(size = 40), #larger y axis text
+    axis.title.y = element_text(size = 40)) #larger y axis title
+
+ggsave(filename = "BLUEs_PIC_output/bottom_median_Max_volume_plant_m3.pdf", 
+       plot = p1, device = pdf, width = 33, height = 20) 
+```
+
+### Calculate BLUEs
+
+```{r}
+Max_volume_plant_m3_lmer <- lmer(formula = Max_volume_plant_m3 ~ Genotype_ID 
+                               + (1|System) + (1|Year),
+                               data = phenotype_17_18,
+                               REML = TRUE)
+```
+
+```{r}
+fe <- fixef(Max_volume_plant_m3_lmer) #extract fixed effects estimates
+
+BLUEs <- fe+c(0,rep(fe[1],length(fe)-1)) #add intercept to all subsequent values
+
+Max_volume_plant_m3_BLUEs <- 
+  BLUEs %>% #BLUEs data as vector
+  as_tibble() %>% #convert to tibble
+  mutate(ID = unique(phenotype$Variety.name)) %>% #add variety name col
+  relocate(ID, before = value) %>% #move ID col to front (for GWAS_poly)
+  rename(Max_volume_plant_m3 = before) #rename col to Max_volume_plant_m3
+```
+
+### QQ plots
+
+```{r, message=FALSE}
+pdf(file = "BLUEs_PIC_output/Max_volume_plant_m3_qq.pdf")
+
+qqnorm(residuals(Max_volume_plant_m3_lmer))
+
+qqline(residuals(Max_volume_plant_m3_lmer))
+
+plot(Max_volume_plant_m3_lmer)
+
+dev.off()
+```
+
+# Comparison of traits
+
+I.e. how one trait predicts another
+
+```{r}
+model <- lm(Yield_Kg ~ Max_Max_height_m, data = phenotype_17_18)
+
+anova(model)
+
+qqnorm(residuals(model))
+
+qqline(residuals(model))
+
+plot(model)
+```
+```{r}
+# Fit the linear model
+model <- lm(Yield_Kg ~ Max_Max_height_m, data = phenotype_17_18)
+
+# Perform ANOVA (this runs without graphics issues)
+anova(model)
+
+# Open a PDF device to save the plots
+pdf(file = "BLUEs_PIC_output/yield_vs_max_height_diagnostics.pdf")
+
+# Generate QQ-norm plot of residuals
+qqnorm(residuals(model))
+
+# Add QQ-line to the plot
+qqline(residuals(model))
+
+# Generate standard diagnostic plots for the model
+plot(model)
+
+# Close the PDF device, saving all plots
+dev.off()
+```
+
+
+
+# Save BLUES
+
+```{r}
+
+#merge dfs
+all_BLUEs <- cbind(yield_BLUEs,
+      Max_Max_height_m_BLUEs,
+      Max_Ave_height_m_BLUEs,
+      Max_area_plant_m2_BLUEs,
+      Max_volume_plant_m3_BLUEs)
+
+#remove additional ID cols
+all_BLUEs <- all_BLUEs[-c(3,5,7,9)]
+
+write.csv(all_BLUEs, 
+          "BLUEs_PIC_output/BLUES.csv",
+          row.names = FALSE)
+```
+
+Also save BLUEs with Q-matrices from STRUCTURE and DAPC
+in a single file.
+
+```{r}
+#load and prep DAPC membership probabilities/Q-matrix
+DAPC_Q_matrix <- read.csv(file = "DAPC_PIC_output/DAPC_membership_probabilities.csv") %>%
+  rename(DAPC_cluster_1 = X1) %>%
+  rename(DAPC_cluster_2 = X2) %>%
+  rename(DAPC_cluster_3 = X3) %>%
+  rename(DAPC_cluster_4 = X4)
+
+#merge BLUEs and DAPC membership probabilities/Q-matrix
+BLUEs_with_DAPC_Q_matrix <- cbind(all_BLUEs, DAPC_Q_matrix)
+BLUEs_with_DAPC_Q_matrix <- 
+  BLUEs_with_DAPC_Q_matrix[-c(7)] #remove additional ID col
+
+################
+
+#load STRUCTURE Q-matrix
+STRUCTURE_Q_matrix <- read.table("STRUCTURE/K3.outfile")
+
+#prep STRUCTURE Q-matrix
+STRUCTURE_Q_matrix <- STRUCTURE_Q_matrix[6:8] %>%
+  rename("STRUCTURE_K1" = V6) %>%
+  rename("STRUCTURE_K2" = V7) %>%
+  rename("STRUCTURE_K3" = V8)
+
+#merge BLUEs with STRUCTURE Q-matrix
+BLUEs_with_Q_matrices <- cbind(BLUEs_with_DAPC_Q_matrix, STRUCTURE_Q_matrix) 
+
+################
+
+#load and prep PCs from PCA
+PCs <- read.csv(file = "DAPC_PIC_output/PCA_principal_components.csv") %>%
+  select(-c("ID")) #remove ID col as not needed 
+
+#merge BLUEs with PCs
+BLUEs_with_Q_matrices_and_PCs <- cbind(BLUEs_with_Q_matrices, PCs)
+
+#save final file
+write.csv(BLUEs_with_Q_matrices_and_PCs, 
+          "BLUEs_PIC_output/BLUEs_with_Q_matrices_and_PCs.csv",
+          row.names = FALSE)
+
+```
+```{r}
+list.files("STRUCTURE/final_results/bestK/CLUMPP/")
+```
+
+
+# References
+
+BATES, D., MÃ„CHLER, M., BOLKER, B., and WALKER, S. (2015). â€˜Fitting Linear Mixed-Effects Models Using lme4,â€™ Journal of Statistical Software, 67(1), pp. 1 - 48. doi:10.18637/jss.v067.i01.
+
+YANG, C.J., RUSSELL, J., RAMSAY, L., THOMAS, W., POWELL, W., and MACKAY, I. (2021). â€˜Overcoming barriers to the registration of new plant varieties under the DUS system,â€™ Communications Biology, 4(1), pp. 302. doi:10.1038/s42003-021-01840-9.
+
+https://github.com/cjyang-work/DUS = github for scripts in yang et al., 2021
+
+
+
