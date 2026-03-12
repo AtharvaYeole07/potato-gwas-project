@@ -7,7 +7,8 @@
 ## Overview
 
 A comprehensive GWAS (Genome-Wide Association Study) pipeline for identifying genetic loci associated with **yield** and **canopy architecture** in a panel of ~282 tetraploid potato (*Solanum tuberosum*) varieties. This project integrates SNP genotype data with multi-year field trial phenotypes and UAV-derived canopy measurements, applying three independent population structure correction approaches to ensure robust marker-trait associations.
-
+Click here for live demo
+https://019ce3c9-6a26-c289-c7c2-cb47bf2977f3.share.connect.posit.cloud/
 ### Highlights
 
 - Tetraploid-aware association mapping with **GWASpoly** (6 genetic models)
